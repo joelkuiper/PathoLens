@@ -13,9 +13,7 @@ from src.dna_utils import (
 )
 from src.clinvar import load_clinvar_variants
 from src.seq_dataset import SequenceTowerDataset, collate_seq
-from src.text_utils import process_and_cache_text, SeqTextPairDataset, collate_pair
-from src.clip_trainer import SeqTextCLIP, train_epoch
-from src.clip_eval import evaluate_clip_fast
+from src.hp import load_hpo_id2label
 
 from util import get_device
 
@@ -24,7 +22,10 @@ OUT_DIR = Path("artifacts")
 FASTA_PATH = DATA_DIR / "raw" / "GCF_000001405.38_GRCh38.p12_genomic.fna"
 CLINVAR_PATH = DATA_DIR / "raw" / "variant_summary.txt.gz"
 CLINVAR_CACHE_MARKER = OUT_DIR / "_cached_clinvar.ok"
-GO_NPZ = "data/processed/go_n2v_genes.npz"
+GO_NPZ = DATA_DIR / "processed" / "go_n2v_genes.npz"
+HP_JSON = DATA_DIR / "raw" / "hp.json"
+
+HP_ID2LABEL = load_hpo_id2label(HP_JSON)
 
 
 def split_by_gene(
@@ -117,15 +118,11 @@ class RunCfg:
     dna_window: int = 512
     dna_pool: str = "mean"
     dna_max_len: int = 512
-    text_max_len: int = 128
-    text_pool: str = "cls"
-    train_bs_pair: int = 512
-    train_bs_seq: int = 1024
     num_workers: int = 2
+    train_bs_seq: int = 1024
     epochs: int = 1
     lr: float = 3e-4
     wd: float = 5e-2
-    amp_dtype = torch.bfloat16
     force_caps: bool = False
     force_txt_emb: bool = False
     force_dna: bool = False
@@ -139,13 +136,6 @@ def _dna_paths(cfg: RunCfg, split: str) -> tuple[str, str]:
     return (
         str(cfg.out_dir / f"dna_{split}.feather"),
         str(cfg.out_dir / f"dna_{split}_eff_fp16.npz"),
-    )
-
-
-def _text_paths(cfg: RunCfg, split: str) -> tuple[str, str]:
-    return (
-        str(cfg.out_dir / f"text_{split}.feather"),
-        str(cfg.out_dir / f"text_{split}_fp16.npz"),
     )
 
 
@@ -172,29 +162,6 @@ def build_dna_caches(
             limit=None,
         )
         out[name] = (kept, npz)
-    return out
-
-
-def build_text_caches(cfg: RunCfg):
-    """
-    Uses dna_*.feather metas to build text captions + embeddings.
-    Returns {split: (text_meta_df, text_npz_path)}
-    """
-    out = {}
-    for name in ("train", "val", "test"):
-        dna_meta, _ = _dna_paths(cfg, name)
-        text_meta, text_npz = _text_paths(cfg, name)
-        df_txt, npz_txt = process_and_cache_text(
-            dna_meta,
-            out_meta=text_meta,
-            out_npz=text_npz,  # <- use text_npz here
-            max_length=cfg.text_max_len,
-            batch_size=512,
-            pool=cfg.text_pool,
-            force_captions=cfg.force_caps,
-            force_embeddings=cfg.force_txt_emb,
-        )
-        out[name] = (df_txt, npz_txt)
     return out
 
 
@@ -242,60 +209,14 @@ def loaders_for_seq(seq_ds: dict[str, "SequenceTowerDataset"], cfg: RunCfg):
     }
 
 
-def build_pair_datasets(seq_ds: dict[str, "SequenceTowerDataset"], cfg: RunCfg):
-    pair = {}
-    for name in ("train", "val", "test"):
-        text_meta, text_npz = _text_paths(cfg, name)
-        pair[name] = SeqTextPairDataset(
-            seq_dataset=seq_ds[name],
-            text_meta_feather=text_meta,
-            text_npz=text_npz,
-            label_col="_y",
-        )
-    return pair
-
-
-def loaders_for_pair(pair_ds: dict[str, "SeqTextPairDataset"], cfg: RunCfg):
-    return {
-        "train": DataLoader(
-            pair_ds["train"],
-            batch_size=cfg.train_bs_pair,
-            shuffle=True,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            collate_fn=collate_pair,
-        ),
-        "val": DataLoader(
-            pair_ds["val"],
-            batch_size=cfg.train_bs_pair,
-            shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            collate_fn=collate_pair,
-        ),
-        "test": DataLoader(
-            pair_ds["test"],
-            batch_size=cfg.train_bs_pair,
-            shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            collate_fn=collate_pair,
-        ),
-    }
-
-
 def main():
     # --- setup ---
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     device = get_device()
     cfg = RunCfg(
         out_dir=OUT_DIR,
         fasta_path=FASTA_PATH,
         go_npz=GO_NPZ,
-        text_pool="mean",  # try mean for HGVS-heavy captions; "cls" also fine
         epochs=1,
-        force_caps=False,
-        force_txt_emb=False,
         force_dna=False,
     )
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
@@ -310,45 +231,24 @@ def main():
     fasta = load_fasta(str(cfg.fasta_path))
     _ = build_dna_caches(cfg, device, fasta, splits)
 
-    # --- 3) Text caches (row-aligned to dna metas) ---
-    _ = build_text_caches(cfg)
-
-    # --- 4) Datasets & loaders ---
+    # --- 3) Datasets & loaders ---
     seq_ds = build_seq_datasets(cfg)
     loaders_seq = loaders_for_seq(seq_ds, cfg)
 
-    pair_ds = build_pair_datasets(seq_ds, cfg)
-    loaders_pair = loaders_for_pair(pair_ds, cfg)
+  # --- 4) LLM: Qwen QLoRA with a virtual token conditioned on [DNA ⊕ GO] ---
 
-    print("Ready:")
-    D_seq = seq_ds["train"].D_eff + seq_ds["train"].D_go
-    D_txt = pair_ds["train"].D_txt
-    print(f"  D_seq = {D_seq}  D_txt = {D_txt}")
-    print(
-        f"  N (train/val/test) = {len(seq_ds['train'])} {len(seq_ds['val'])} {len(seq_ds['test'])}"
-    )
 
-    # --- 5) Train CLIP heads ---
-    model = SeqTextCLIP(
-        D_seq, D_txt, d_out=512, hidden=1024, p=0.2
-    )  # freeze_tau default True
-    best = train_epoch(
-        loaders_pair["train"],
-        loaders_pair["val"],
-        model,
-        epochs=cfg.epochs,
-        lr=cfg.lr,
-        wd=cfg.wd,
-        loss_mode="ce",  # explicit; switch to "supcon" if you want
-    )
-    torch.save(best["state"], cfg.out_dir / "clip_seqtext.pt")
-    print("best val loss:", best["val_loss"])
+  from src.llm import run_llm_pipeline
 
-    # --- 6) Eval (fast) ---
-    val_metrics = evaluate_clip_fast(
-        model, loaders_pair["val"], device=device, k_list=(1, 5, 10, 50)
-    )
-    print("VAL:", val_metrics)
+  llm_out_dir = str(OUT_DIR / "qwen3_hpo_lora")
+  llm_res = run_llm_pipeline(
+      out_dir=llm_out_dir,
+      seq_ds=seq_ds,                # {"train","val","test"} SequenceTowerDataset
+  )
+
+  print("LLM eval:", llm_res["eval"])
+
+
 
 
 if __name__ == "__main__":
