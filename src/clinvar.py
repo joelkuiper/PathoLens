@@ -164,7 +164,7 @@ def clean_label(cs: str | None) -> int | None:
     return None
 
 
-def load_clinvar_variants(path, hpo_id2label: dict[str, str]) -> pd.DataFrame:
+def load_clinvar_variants(path) -> pd.DataFrame:
     df = pd.read_table(
         path, compression="gzip" if path.endswith(".gz") else None, sep="\t"
     )
