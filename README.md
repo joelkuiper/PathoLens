@@ -7,6 +7,20 @@ Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicit
 
 Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from two sources: a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and a [node2vec](https://en.wikipedia.org/wiki/Node2vec) embedding over the [Gene Ontology](https://www.geneontology.org/).
 
+## Input
+
+- [Gene Association File](https://current.geneontology.org/annotations/goa_human.gaf.gz)
+- [Gene Ontology JSON](https://purl.obolibrary.org/obo/go.json)
+- [ClinVar variant summary](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz)
+- [GRCh38 fna](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz)
+
+To download them you can use:
+
+```bash
+mkdir -p data/raw/
+wget -i sources.txt -P data/raw/
+```
+
 ## Intuition and basic idea
 
 PathoLens separates “feature extraction” from “decision making.” The feature extractor produces a compact numeric summary of the variant: a nucleotide-transformer difference vector (`dna_alt – dna_ref`) that approximates local sequence perturbation, concatenated with a node2vec embedding of the gene’s GO neighborhood. This joint vector is projected into a small set of *virtual tokens* that are prepended to the natural-language prompt. A decoder-only LLM is then fine-tuned (via LoRA) to read those tokens alongside a short textual context (gene symbol, HGVS, coarse consequence heuristics) and emit a single-word label.
@@ -28,7 +42,7 @@ The sequence→effect mapping is also mediated by layers the model does not see:
 
 ## Data and splits
 
-It restricts to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
+We restrict to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
 
 ## Implementation
 
