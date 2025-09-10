@@ -1,0 +1,336 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+import os, time, json, numpy as np, torch, torch.nn as nn
+from typing import Dict, Any
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from transformers import (
+    Trainer,
+    TrainingArguments,
+    TrainerCallback,
+    TrainerState,
+    TrainerControl,
+)
+from .config import LLMConfig, BIN_LABELS, set_all_seeds
+from .modeling import build_qwen_with_lora
+from .data import CondTextDataset, make_collator, build_ctx_from_name
+from .infer import predict_label_with_probs
+
+
+class CondTrainer(Trainer):
+    def __init__(self, *args, train_sampler=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._custom_train_sampler = train_sampler
+
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+        if self._custom_train_sampler is None:
+            return super().get_train_dataloader()
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            sampler=self._custom_train_sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            persistent_workers=self.args.dataloader_persistent_workers,
+        )
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        inputs = dict(inputs)
+        input_ids = inputs.pop("input_ids")
+        attention_mask = inputs.pop("attention_mask", None)
+        labels = inputs.pop("labels", None)
+        label_weights = inputs.pop("label_weights", None)
+        cond_vec = inputs.pop("cond_vec")
+
+        txt_emb = model.get_input_embeddings()(input_ids)
+        cond_vec = cond_vec.to(device=txt_emb.device, dtype=txt_emb.dtype)
+        cond_emb = model.cond_projector(cond_vec)
+        inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
+
+        if attention_mask is not None:
+            B, K = attention_mask.size(0), cond_emb.size(1)
+            ones = torch.ones(
+                (B, K), dtype=attention_mask.dtype, device=attention_mask.device
+            )
+            attention_mask = torch.cat([ones, attention_mask], dim=1)
+        if labels is not None:
+            B, K = labels.size(0), cond_emb.size(1)
+            ignore = torch.full((B, K), -100, dtype=labels.dtype, device=labels.device)
+            labels = torch.cat([ignore, labels], dim=1)
+        if label_weights is not None:
+            B, K = label_weights.size(0), cond_emb.size(1)
+            zeros = torch.zeros(
+                (B, K), dtype=label_weights.dtype, device=label_weights.device
+            )
+            label_weights = torch.cat([zeros, label_weights], dim=1)
+
+        out = model(
+            inputs_embeds=inputs_embeds, attention_mask=attention_mask, use_cache=False
+        )
+        logits = out.logits
+        if labels is None:
+            loss = (
+                out.loss
+                if hasattr(out, "loss")
+                else torch.tensor(0.0, device=logits.device)
+            )
+        else:
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[
+                :,
+                1:,
+            ].contiguous()
+            shift_w = (
+                label_weights[
+                    :,
+                    1:,
+                ].contiguous()
+                if label_weights is not None
+                else torch.ones_like(shift_labels, dtype=torch.float32)
+            )
+            loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
+            loss_tok = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            ).view_as(shift_labels)
+            valid = (shift_labels != -100).float()
+            loss = (loss_tok * shift_w * valid).sum() / valid.sum().clamp_min(1.0)
+
+        return (loss, out) if return_outputs else loss
+
+
+class _FirstStepTimerCallback(TrainerCallback):
+    def __init__(self):
+        self._t0 = None
+        self._stepped = False
+
+    def on_init_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        print("[DEBUG] Trainer init complete.")
+        return control
+
+    def on_train_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        self._t0 = time.time()
+        self._stepped = False
+        print("[DEBUG] Training started ...")
+        return control
+
+    def on_step_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        if not self._stepped:
+            self._stepped = True
+            dt = time.time() - (self._t0 or time.time())
+            print(f"[DEBUG] Time to first optimizer step: {dt:.2f}s")
+        return control
+
+
+def _true_label_from_meta(row) -> int | None:
+    from .config import clinsig_to_binary
+
+    y = row.get("_y", None)
+    if y is not None:
+        try:
+            return int(y)
+        except Exception:
+            pass
+    return clinsig_to_binary(row.get("ClinicalSignificance", ""))
+
+
+def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
+    ys = []
+    for i in range(len(train_ds)):
+        row = train_ds.meta.iloc[i]
+        y = _true_label_from_meta(row)
+        ys.append(int(0 if y is None else y))
+    ys = np.asarray(ys)
+    n_pos = max(1, int(ys.sum()))
+    n_neg = max(1, int((1 - ys).sum()))
+    w_pos, w_neg = 1.0 / n_pos, 1.0 / n_neg
+    weights = np.where(ys == 1, w_pos, w_neg).astype("float32")
+    return WeightedRandomSampler(
+        weights=torch.from_numpy(weights), num_samples=len(train_ds), replacement=True
+    )
+
+
+def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMConfig):
+    print("\n========== SMOKE CHECKS ==========")
+    total_train, total_val = len(seq_ds_dict["train"]), len(seq_ds_dict["val"])
+    print(f"[SMOKE] Train size: {total_train}  |  Val size: {total_val}")
+
+    from collections import Counter
+
+    def label_stats(ds, N=5000):
+        ys = []
+        for i in range(min(len(ds), N)):
+            row = ds.meta.iloc[i]
+            y = _true_label_from_meta(row)
+            if y is not None:
+                ys.append(int(y))
+        c = Counter(ys)
+        return {"n": len(ys), "pos": c.get(1, 0), "neg": c.get(0, 0)}
+
+    tr = label_stats(seq_ds_dict["train"])
+    va = label_stats(seq_ds_dict["val"])
+    print(
+        f"[SMOKE] Label coverage (≤5k): train n={tr['n']} (+:{tr['pos']}, -:{tr['neg']}), val n={va['n']} (+:{va['pos']}, -:{va['neg']})"
+    )
+
+    row0 = seq_ds_dict["train"].meta.iloc[0]
+    ctx0 = build_ctx_from_name(row0)
+    from .chat import build_chat_strings
+
+    p0 = f"Variant context (no phenotype):\n{ctx0}\n\nReturn label now:"
+    pr, fu = build_chat_strings(tokenizer, [p0], ["Benign"])
+    print("[SMOKE] Example context:\n", ctx0)
+    print("[SMOKE] Chat prompt (trunc 200):", pr[0][:200].replace("\n", "\\n"), "...")
+    print("[SMOKE] Chat full   (trunc 200):", fu[0][:200].replace("\n", "\\n"), "...")
+
+
+def run_llm_pipeline(
+    out_dir: str,
+    seq_ds: Dict[str, object],
+    *,
+    model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
+    epochs: int = 1,
+    max_len: int = 256,
+    per_device_bs: int = 16,
+    grad_accum: int = 8,
+    lr: float = 3e-4,
+    seed: int = 42,
+    num_workers: int = 0,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False,
+    pin_memory: bool = True,
+    group_by_length: bool = False,
+    drop_last: bool = True,
+    balanced_sampling: bool = True,
+) -> Dict[str, Any]:
+
+    os.makedirs(out_dir, exist_ok=True)
+    set_all_seeds(seed)
+    cfg = LLMConfig(
+        model_id=model_id,
+        out_dir=out_dir,
+        max_len=max_len,
+        lr=lr,
+        epochs=epochs,
+        grad_accum=grad_accum,
+        per_device_bs=per_device_bs,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
+        group_by_length=group_by_length,
+        drop_last=drop_last,
+        seed=seed,
+    )
+
+    tok, base_model, projector = build_qwen_with_lora(
+        cfg, seq_ds["train"].D_eff + seq_ds["train"].D_go
+    )
+
+    base_model.config.use_cache = False
+
+    print("[DEBUG] Building CondTextDataset(train/val) ...")
+    train_ds = CondTextDataset(seq_ds["train"], tokenizer=tok)
+    val_ds = CondTextDataset(seq_ds["val"], tokenizer=tok)
+    collator = make_collator(tok, max_len=cfg.max_len)
+    smoke_checks(seq_ds, tok, cfg)
+
+    # Balanced sampler
+    sampler = _make_balanced_sampler(train_ds) if balanced_sampling else None
+
+    args = TrainingArguments(
+        output_dir=cfg.out_dir,
+        per_device_train_batch_size=cfg.per_device_bs,
+        per_device_eval_batch_size=cfg.per_device_bs,
+        gradient_accumulation_steps=cfg.grad_accum,
+        learning_rate=cfg.lr,
+        weight_decay=0.01,
+        num_train_epochs=cfg.epochs,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.03,
+        logging_steps=50,
+        eval_steps=500,
+        save_strategy="steps",
+        save_steps=1000,
+        bf16=cfg.bf16,
+        gradient_checkpointing=False,
+        report_to="none",
+        remove_unused_columns=False,
+        dataloader_num_workers=cfg.num_workers,
+        dataloader_pin_memory=cfg.pin_memory,
+        dataloader_prefetch_factor=None,
+        dataloader_persistent_workers=False,
+        group_by_length=cfg.group_by_length,
+        optim="paged_adamw_8bit",
+        tf32=True,
+        seed=cfg.seed,
+        data_seed=cfg.seed,
+    )
+
+    trainer = CondTrainer(
+        model=base_model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        data_collator=collator,
+        callbacks=[_FirstStepTimerCallback()],
+        train_sampler=sampler,
+    )
+
+    dev = next(base_model.parameters()).device
+    print(f"[INFO] Device: {dev} | CUDA={torch.cuda.is_available()} | bf16={cfg.bf16}")
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info()
+        print(f"[INFO] GPU mem: free={free/1e9:.2f}G total={total/1e9:.2f}G")
+        print("[INFO] TF32:", torch.backends.cuda.matmul.allow_tf32)
+
+    print("[DEBUG] Probing first training batch...")
+    t0 = time.time()
+    batch = next(iter(trainer.get_train_dataloader()))
+    print(f"[DEBUG] Got first batch in {time.time()-t0:.2f}s")
+    for k, v in batch.items():
+        print(f"  {k}: shape={tuple(v.shape)} dtype={getattr(v,'dtype',None)}")
+
+    trainer.train()
+
+    base_model.save_pretrained(os.path.join(out_dir, "adapter"))
+    torch.save(projector.state_dict(), os.path.join(out_dir, "projector.pt"))
+    print("[INFO] Saved adapter + projector.")
+
+    # Quick eval using label scoring
+    from .infer import quick_eval_pathogenicity_binary
+
+    print("[INFO] Running quick eval on val split ...")
+    eval_res = quick_eval_pathogenicity_binary(base_model, tok, seq_ds["val"], n=512)
+    print(
+        "[INFO] Eval:",
+        json.dumps(
+            {
+                k: v
+                for k, v in eval_res.items()
+                if k in ("n", "accuracy", "precision", "recall", "f1")
+            },
+            indent=2,
+        ),
+    )
+    return {"eval": eval_res, "out_dir": out_dir}

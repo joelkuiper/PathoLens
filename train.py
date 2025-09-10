@@ -238,13 +238,24 @@ def main():
   # --- 4) LLM: Qwen QLoRA with a virtual token conditioned on [DNA ⊕ GO] ---
 
 
-  from src.llm import run_llm_pipeline
+  from src.llm.train import run_llm_pipeline
 
   llm_out_dir = str(OUT_DIR / "qwen3_hpo_lora")
   llm_res = run_llm_pipeline(
       out_dir=llm_out_dir,
-      seq_ds=seq_ds,                # {"train","val","test"} SequenceTowerDataset
+      seq_ds=seq_ds,                         # {"train","val","test"} SequenceTowerDataset
+      model_id="Qwen/Qwen3-4B-Instruct-2507",
+      epochs=1,
+      max_len=256,
+      per_device_bs=16,
+      grad_accum=8,
+      lr=3e-4,
+      balanced_sampling=True,                # uses WeightedRandomSampler
   )
+
+  from src.llm.infer import quick_smoke_generate_labels
+  quick_smoke_generate_labels(seq_ds, llm_out_dir, n=8, with_rationale=True)
+
 
   print("LLM eval:", llm_res["eval"])
 
