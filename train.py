@@ -44,12 +44,7 @@ def split_by_gene(
     # assign each gene a label = majority class of its variants
     gene2label = {}
     for g, sub in df.groupby("GeneSymbol"):
-        y = (
-            sub["ClinicalSignificance"]
-            .fillna("")
-            .str.contains("Pathogenic", case=False)
-            .astype(int)
-        )
+        y = sub["_y"].astype(int)
         label = int(round(y.mean()))
         gene2label[g] = label
 

@@ -164,6 +164,42 @@ def clean_label(cs: str | None) -> int | None:
     return None
 
 
+def build_context(row) -> str:
+    """Build a simple textual context from precomputed columns."""
+    lines = []
+    gene = row.get("GeneSymbol", "") or ""
+    hgvsc = row.get("hgvsc", "")
+    hgvsp = row.get("hgvsp", "")
+    pcls = row.get("protein_change", "")
+    region = row.get("cfeat_region", "unknown")
+    splice = bool(row.get("cfeat_splice", False))
+    kind = row.get("cfeat_kind", "other")
+    indel_len = int(row.get("cfeat_indel_len", 0) or 0)
+    fs = row.get("cfeat_frameshift_guess", None)
+    snv_change = row.get("cfeat_snv_change", "")
+
+    if gene:
+        lines.append(f"Gene: {gene}")
+    if hgvsc:
+        lines.append(f"HGVS.c: {hgvsc}")
+    if hgvsp:
+        lines.append(f"HGVS.p: {hgvsp}")
+    cons = pcls or ("splice" if splice else (kind if kind != "other" else ""))
+    if cons:
+        lines.append(f"Consequence: {cons}")
+    if region != "unknown":
+        lines.append(f"Region: {region}")
+    if splice:
+        lines.append("Splice-site: yes")
+    if indel_len > 0:
+        lines.append(f"Indel length: {indel_len}")
+    if fs is not None:
+        lines.append(f"Frameshift (heuristic): {'yes' if fs else 'no'}")
+    if snv_change:
+        lines.append(f"SNV change: {snv_change}")
+    return "\n".join(lines) if lines else "Variant context provided."
+
+
 def load_clinvar_variants(path) -> pd.DataFrame:
     df = pd.read_table(
         path, compression="gzip" if path.endswith(".gz") else None, sep="\t"
@@ -191,6 +227,16 @@ def load_clinvar_variants(path) -> pd.DataFrame:
     df = df.dropna(subset=["_y"]).copy()
     df["_y"] = df["_y"].astype(int)
 
+    # Precompute gene + variant features
+    df["GeneSymbol"] = df.apply(pick_gene, axis=1)
+    df["hgvsc"] = df["Name"].map(extract_hgvsc)
+    df["hgvsp"] = df["Name"].map(extract_hgvsp)
+    df["protein_change"] = df["hgvsp"].map(classify_protein_change)
+    cfeat = df["hgvsc"].map(parse_hgvsc_features).apply(pd.Series)
+    cfeat = cfeat.add_prefix("cfeat_")
+    df = pd.concat([df, cfeat], axis=1)
+    df["context"] = df.apply(build_context, axis=1)
+
     # Normalize dtypes for Arrow/Feather
     for col in [
         "Chromosome",
@@ -200,7 +246,17 @@ def load_clinvar_variants(path) -> pd.DataFrame:
         "ReviewStatus",
         "PhenotypeIDS",
         "PhenotypeList",
+        "hgvsc",
+        "hgvsp",
+        "protein_change",
+        "cfeat_region",
+        "cfeat_kind",
+        "cfeat_snv_change",
+        "context",
     ]:
         df[col] = df[col].astype("string")
+    df["cfeat_splice"] = df["cfeat_splice"].astype("boolean")
+    df["cfeat_indel_len"] = df["cfeat_indel_len"].astype("Int64")
+    df["cfeat_frameshift_guess"] = df["cfeat_frameshift_guess"].astype("boolean")
 
     return df.reset_index(drop=True)

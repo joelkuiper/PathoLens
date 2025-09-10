@@ -1,66 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import List, Tuple
+from typing import Tuple
 import time
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from .config import PROMPT_TMPL, clinsig_to_binary
+from .config import PROMPT_TMPL
 from .chat import build_chat_strings
-from src.clinvar import (
-    pick_gene,
-    extract_hgvsc,
-    extract_hgvsp,
-    classify_protein_change,
-    parse_hgvsc_features,
-)
-
-
-# ---------- Context builder ----------
-def build_ctx_from_name(row) -> str:
-    name = row.get("Name", "") or ""
-    gene = pick_gene(row)
-    hgvsc = extract_hgvsc(name)
-    hgvsp = extract_hgvsp(name)
-    pcls = classify_protein_change(hgvsp)
-    cfeat = parse_hgvsc_features(hgvsc)
-
-    lines: List[str] = []
-    if gene:
-        lines.append(f"Gene: {gene}")
-    if hgvsc:
-        lines.append(f"HGVS.c: {hgvsc}")
-    if hgvsp:
-        lines.append(f"HGVS.p: {hgvsp}")
-    cons = pcls or (
-        "splice"
-        if cfeat["splice"]
-        else (cfeat["kind"] if cfeat["kind"] != "other" else "")
-    )
-    if cons:
-        lines.append(f"Consequence: {cons}")
-    if cfeat["region"] != "unknown":
-        lines.append(f"Region: {cfeat['region']}")
-    if cfeat["splice"]:
-        lines.append("Splice-site: yes")
-    if cfeat["indel_len"] > 0:
-        lines.append(f"Indel length: {cfeat['indel_len']}")
-    if cfeat["frameshift_guess"] is not None:
-        lines.append(
-            f"Frameshift (heuristic): {'yes' if cfeat['frameshift_guess'] else 'no'}"
-        )
-    if cfeat["snv_change"]:
-        lines.append(f"SNV change: {cfeat['snv_change']}")
-    return "\n".join(lines) if lines else "Variant context provided."
-
 
 def row_to_example(meta_row) -> Tuple[str, str]:
     """Training target is just the label: 'Benign' or 'Pathogenic'."""
-    ctx = build_ctx_from_name(meta_row)
+    ctx = meta_row.get("context", "") or ""
     prompt = PROMPT_TMPL.format(ctx=ctx)
-    y = meta_row.get("_y", None)
-    if y is None:
-        y = clinsig_to_binary(meta_row.get("ClinicalSignificance", ""))
+    y = int(meta_row.get("_y"))
     cls = "Pathogenic" if y == 1 else "Benign"
     return prompt, cls
 

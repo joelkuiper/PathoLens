@@ -267,15 +267,11 @@ def quick_eval_pathogenicity_binary(
     enable_fast_generate(model, tokenizer)
 
     def _true_label_from_meta(row) -> int | None:
-        from .config import clinsig_to_binary
-
         y = row.get("_y", None)
-        if y is not None:
-            try:
-                return int(y)
-            except Exception:
-                pass
-        return clinsig_to_binary(row.get("ClinicalSignificance", ""))
+        try:
+            return int(y) if y is not None else None
+        except Exception:
+            return None
 
     y_true, y_pred, examples = [], [], []
     for i in idxs:
@@ -285,9 +281,7 @@ def quick_eval_pathogenicity_binary(
         y = _true_label_from_meta(row)
         if y is None:
             continue
-        from .data import build_ctx_from_name
-
-        ctx = build_ctx_from_name(row)
+        ctx = row.get("context", "")
         prompt = f"Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
         out = predict_label_with_probs(model, tokenizer, prompt, cond)
         cls = out["label"]
@@ -350,14 +344,9 @@ def quick_smoke_generate_labels(seq_ds, out_dir, n=8, seed=0, with_rationale=Tru
         x, _, _ = val[i]
         cond = x.numpy()
         row = val.meta.iloc[i]
-        from .config import clinsig_to_binary
-
         y = row.get("_y", None)
-        if y is None:
-            y = clinsig_to_binary(row.get("ClinicalSignificance", ""))
-        from .data import build_ctx_from_name
-
-        ctx = build_ctx_from_name(row)
+        y = int(y) if y is not None else None
+        ctx = row.get("context", "")
         prompt = f"Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
 
         if with_rationale:

@@ -18,21 +18,7 @@ Pathogenic
 
 BIN_LABELS = ["Benign", "Pathogenic"]
 
-POS = {"pathogenic", "likely pathogenic", "pathogenic/likely pathogenic"}
-NEG = {"benign", "likely benign", "benign/likely benign"}
-
 PROMPT_TMPL = "Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
-
-
-def clinsig_to_binary(cs: str | None) -> int | None:
-    if not isinstance(cs, str):
-        return None
-    s = cs.strip().lower()
-    if s in POS:
-        return 1
-    if s in NEG:
-        return 0
-    return None
 
 
 # ===== Run config =====

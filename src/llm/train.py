@@ -17,7 +17,7 @@ from transformers import (
 )
 from .config import LLMConfig, set_all_seeds
 from .modeling import build_qwen_with_lora
-from .data import CondTextDataset, make_collator, build_ctx_from_name
+from .data import CondTextDataset, make_collator
 
 
 class CondTrainer(Trainer):
@@ -147,15 +147,11 @@ class _FirstStepTimerCallback(TrainerCallback):
 
 
 def _true_label_from_meta(row) -> int | None:
-    from .config import clinsig_to_binary
-
     y = row.get("_y", None)
-    if y is not None:
-        try:
-            return int(y)
-        except Exception:
-            pass
-    return clinsig_to_binary(row.get("ClinicalSignificance", ""))
+    try:
+        return int(y) if y is not None else None
+    except Exception:
+        return None
 
 
 def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
@@ -198,7 +194,7 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMConfig):
     )
 
     row0 = seq_ds_dict["train"].meta.iloc[0]
-    ctx0 = build_ctx_from_name(row0)
+    ctx0 = row0.get("context", "")
     from .chat import build_chat_strings
 
     p0 = f"Variant context (no phenotype):\n{ctx0}\n\nReturn label now:"
