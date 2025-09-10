@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import os, time, json, numpy as np, torch, torch.nn as nn
+import os
+import time
+import json
+import numpy as np
+import torch
+import torch.nn as nn
 from typing import Dict, Any
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import (
@@ -10,10 +15,9 @@ from transformers import (
     TrainerState,
     TrainerControl,
 )
-from .config import LLMConfig, BIN_LABELS, set_all_seeds
+from .config import LLMConfig, set_all_seeds
 from .modeling import build_qwen_with_lora
 from .data import CondTextDataset, make_collator, build_ctx_from_name
-from .infer import predict_label_with_probs
 
 
 class CondTrainer(Trainer):
@@ -223,7 +227,6 @@ def run_llm_pipeline(
     drop_last: bool = True,
     balanced_sampling: bool = True,
 ) -> Dict[str, Any]:
-
     os.makedirs(out_dir, exist_ok=True)
     set_all_seeds(seed)
     cfg = LLMConfig(
@@ -301,15 +304,15 @@ def run_llm_pipeline(
     print(f"[INFO] Device: {dev} | CUDA={torch.cuda.is_available()} | bf16={cfg.bf16}")
     if torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info()
-        print(f"[INFO] GPU mem: free={free/1e9:.2f}G total={total/1e9:.2f}G")
+        print(f"[INFO] GPU mem: free={free / 1e9:.2f}G total={total / 1e9:.2f}G")
         print("[INFO] TF32:", torch.backends.cuda.matmul.allow_tf32)
 
     print("[DEBUG] Probing first training batch...")
     t0 = time.time()
     batch = next(iter(trainer.get_train_dataloader()))
-    print(f"[DEBUG] Got first batch in {time.time()-t0:.2f}s")
+    print(f"[DEBUG] Got first batch in {time.time() - t0:.2f}s")
     for k, v in batch.items():
-        print(f"  {k}: shape={tuple(v.shape)} dtype={getattr(v,'dtype',None)}")
+        print(f"  {k}: shape={tuple(v.shape)} dtype={getattr(v, 'dtype', None)}")
 
     trainer.train()
 

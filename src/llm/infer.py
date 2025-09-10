@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Dict, Any, List, Tuple
-import numpy as np, torch
+from typing import Dict, Any, List
+import numpy as np
+import torch
 from .config import CHAT_SYSTEM, BIN_LABELS
 from .chat import sanitize_model_text
 from .modeling import enable_fast_generate

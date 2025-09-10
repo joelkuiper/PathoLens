@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import random, numpy as np, torch
+import random
+import numpy as np
+import torch
 from dataclasses import dataclass
 
 # ===== System / prompt =====

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import argparse, gzip, json, re
+import argparse
+import gzip
+import json
+import re
 from typing import List, Tuple
 import networkx as nx
 import numpy as np

@@ -1,9 +1,8 @@
+from __future__ import annotations
+
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import torch
-from __future__ import annotations
-import os
 from dataclasses import dataclass
 from torch.utils.data import DataLoader
 
@@ -13,7 +12,6 @@ from src.dna_utils import (
 )
 from src.clinvar import load_clinvar_variants
 from src.seq_dataset import SequenceTowerDataset, collate_seq
-from src.hp import load_hpo_id2label
 
 from util import get_device
 
@@ -23,6 +21,7 @@ FASTA_PATH = DATA_DIR / "raw" / "GCF_000001405.40_GRCh38.p14_genomic.fna"
 CLINVAR_PATH = DATA_DIR / "raw" / "variant_summary.txt.gz"
 CLINVAR_CACHE_MARKER = OUT_DIR / "_cached_clinvar.ok"
 GO_NPZ = DATA_DIR / "processed" / "go_n2v_genes.npz"
+
 
 def split_by_gene(
     df: pd.DataFrame,
@@ -231,31 +230,27 @@ def main():
     seq_ds = build_seq_datasets(cfg)
     loaders_seq = loaders_for_seq(seq_ds, cfg)
 
-  # --- 4) LLM: Qwen QLoRA with a virtual token conditioned on [DNA ⊕ GO] ---
+    # --- 4) LLM: Qwen QLoRA with a virtual token conditioned on [DNA ⊕ GO] ---
+    from src.llm.train import run_llm_pipeline
 
+    llm_out_dir = str(OUT_DIR / "qwen3_hpo_lora")
 
-  from src.llm.train import run_llm_pipeline
+    llm_res = run_llm_pipeline(
+        out_dir=llm_out_dir,
+        seq_ds=seq_ds,  # {"train","val","test"} SequenceTowerDataset
+        model_id="Qwen/Qwen3-4B-Instruct-2507",
+        epochs=1,
+        max_len=256,
+        per_device_bs=16,
+        grad_accum=8,
+        lr=3e-4,
+        balanced_sampling=True,  # uses WeightedRandomSampler
+    )
 
-  llm_out_dir = str(OUT_DIR / "qwen3_hpo_lora")
-  llm_res = run_llm_pipeline(
-      out_dir=llm_out_dir,
-      seq_ds=seq_ds,                         # {"train","val","test"} SequenceTowerDataset
-      model_id="Qwen/Qwen3-4B-Instruct-2507",
-      epochs=1,
-      max_len=256,
-      per_device_bs=16,
-      grad_accum=8,
-      lr=3e-4,
-      balanced_sampling=True,                # uses WeightedRandomSampler
-  )
+    from src.llm.infer import quick_smoke_generate_labels
 
-  from src.llm.infer import quick_smoke_generate_labels
-  quick_smoke_generate_labels(seq_ds, llm_out_dir, n=8, with_rationale=True)
-
-
-  print("LLM eval:", llm_res["eval"])
-
-
+    quick_smoke_generate_labels(seq_ds, llm_out_dir, n=8, with_rationale=True)
+    print("LLM eval:", llm_res["eval"])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-import json, re
+import json
+import re
 
 _HP_IRI_RE = re.compile(r"(?:^|/)(HP)[:_](\d{7})$")  # .../HP_0000712 or HP:0000712
 

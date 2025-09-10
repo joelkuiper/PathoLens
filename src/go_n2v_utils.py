@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import Dict, List, Tuple, Iterable, Optional
+from typing import Dict, Iterable, Optional
 
 
 class GeneGOEmbeddings:

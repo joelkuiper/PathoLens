@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import re
-from typing import List, Optional, Tuple
 
 from .config import CHAT_SYSTEM
 

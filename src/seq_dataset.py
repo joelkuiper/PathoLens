@@ -1,7 +1,9 @@
 # seq_dataset.py
 from __future__ import annotations
-from typing import Optional, Tuple, List, Dict
-import numpy as np, pandas as pd, torch
+from typing import Optional, Tuple, Dict
+import numpy as np
+import pandas as pd
+import torch
 from torch.utils.data import Dataset
 from src.go_n2v_utils import GeneGOEmbeddings
 
@@ -49,7 +51,7 @@ class SequenceTowerDataset(Dataset):
         genes = self.meta["GeneSymbol"].astype(str).str.upper().tolist()
         self.go_hits = sum(g in self.go.name2idx for g in genes) / max(1, len(genes))
         print(
-            f"[GO] hit-rate: {self.go_hits:.3f} (found gene→GO for {int(self.go_hits*len(genes))}/{len(genes)})"
+            f"[GO] hit-rate: {self.go_hits:.3f} (found gene→GO for {int(self.go_hits * len(genes))}/{len(genes)})"
         )
 
     def __len__(self) -> int:

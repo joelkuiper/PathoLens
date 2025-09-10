@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Dict, List, Tuple
-import time, numpy as np, torch
+from typing import List, Tuple
+import time
+import numpy as np
+import torch
 from torch.utils.data import Dataset
 from .config import PROMPT_TMPL, clinsig_to_binary
 from .chat import build_chat_strings
@@ -70,7 +72,7 @@ class CondTextDataset(Dataset):
         self.seq_ds = seq_ds
         self.meta = seq_ds.meta
         self.D_cond = seq_ds.D_eff + seq_ds.D_go
-        print(f"[DEBUG] Dataset ready. Build time: {time.time()-t0:.2f}s")
+        print(f"[DEBUG] Dataset ready. Build time: {time.time() - t0:.2f}s")
 
     def __len__(self):
         return len(self.seq_ds)
