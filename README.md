@@ -28,15 +28,19 @@ The sequence→effect mapping is also mediated by layers the model does not see:
 
 ## Data and splits
 
-I restrict to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
+It restricts to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
 
 ## Implementation
 
-### Node2Vec (GO embedding)
-I construct a graph from GO relations and train node2vec; a gene’s GO vector is obtained by pooling its associated term embeddings. The representation is intentionally low-dimensional so the LLM treats it as context rather than a substitute classifier.
+### GO embedding (Gene Ontology)
+We derive **gene-level embeddings** from a heterogeneous GO graph constructed from the **Gene Annotation File (GAF)**. Nodes represent genes and GO terms; edges connect each human gene (taxon 9606) to the GO terms it is annotated with, after removing `NOT` qualifiers and, optionally, restricting to curated evidence codes. To inject hierarchical context, the graph also includes GO **term–term** links limited to `is_a` and `part_of` relations parsed from the GO graph. To reduce hub effects and trivial shortcuts, the three GO root terms are dropped and very high-degree term nodes can be pruned; any isolates created by pruning are removed. A Node2Vec model is then trained on this graph, and only the gene embeddings are retained and L2-normalized. These vectors summarize each gene’s neighborhood in GO.
 
-### DNA embedding
-For each variant I extract 512 bp windows for reference and alternate alleles under GRCh38, embed both with the 1000G nucleotide transformer, and form `dna_eff = embed(alt) – embed(ref)`. Concatenate with the GO vector to get the final conditioning vector (`dna_eff ⊕ GO(gene)`).
+
+### DNA embedding (reference/alternate FASTA windows)
+We derive a **local sequence perturbation vector** from GRCh38 using the ClinVar VCF-style fields. For each variant, it opens the reference FASTA with `pyfaidx` and pulls a symmetric window around the locus (default ±512 bp, configurable). Coordinates are handled in **1-based VCF convention**: given `ChromosomeAccession`, `PositionVCF`, `ReferenceAlleleVCF`, and `AlternateAlleleVCF`, it slices `[pos−window … pos+len(ref)−1+window]` from the chromosome, verifies that the REF allele matches the FASTA at the expected offset, and **skips** any record that fails this check. The **alternate window** is synthesized in-place by replacing the REF span with ALT (so indels are handled naturally). All characters are upper-cased and non-IUPAC bases are sanitized to `N` to avoid tokenizer surprises. These **REF** and **ALT** windows are then embedded with the 1000G nucleotide transformer, and a single vector per window is obtained by masked mean pooling over token embeddings.
+
+The final signal is the **normalized effect vector** `dna_eff = normalize(embed(ALT) − embed(REF))`, which emphasizes local changes while cancelling much of the background sequence. Only this effect array is persisted on disk (FP16 in a compressed NPZ), alongside a Feather file that caches the curated windows and minimal provenance (window size, FASTA path, row alignment). At training time, `dna_eff` is concatenated with the gene’s GO embedding (`dna_eff ⊕ GO(gene)`) to form the conditioning input supplied to the LLM as virtual tokens.
+
 
 ### LLM fine-tuning
 The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A small projector (Linear → Tanh) maps the conditioning vector to **K** virtual token embeddings (default **K = 4**), which are prepended to the chat prompt. Fine-tuning uses LoRA on attention and MLP blocks.
