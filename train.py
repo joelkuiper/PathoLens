@@ -19,14 +19,10 @@ from util import get_device
 
 DATA_DIR = Path("data")
 OUT_DIR = Path("artifacts")
-FASTA_PATH = DATA_DIR / "raw" / "GCF_000001405.38_GRCh38.p12_genomic.fna"
+FASTA_PATH = DATA_DIR / "raw" / "GCF_000001405.40_GRCh38.p14_genomic.fna"
 CLINVAR_PATH = DATA_DIR / "raw" / "variant_summary.txt.gz"
 CLINVAR_CACHE_MARKER = OUT_DIR / "_cached_clinvar.ok"
 GO_NPZ = DATA_DIR / "processed" / "go_n2v_genes.npz"
-HP_JSON = DATA_DIR / "raw" / "hp.json"
-
-HP_ID2LABEL = load_hpo_id2label(HP_JSON)
-
 
 def split_by_gene(
     df: pd.DataFrame,

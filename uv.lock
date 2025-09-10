@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -2038,6 +2038,15 @@ wheels = [
 ]
 
 [[package]]
+name = "torch-cluster"
+version = "1.6.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/31/e7f7a28253cd907404eb652607613b35779140b326d15d0636511b7b9438/torch_cluster-1.6.3.tar.gz", hash = "sha256:78d5a930a5bbd0d8788df8c6d66addd68d6dd292fe3edb401e3dacba26308152", size = 54550, upload-time = "2023-10-12T06:52:43.728Z" }
+
+[[package]]
 name = "torch-geometric"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2175,7 +2184,6 @@ source = { virtual = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "biopython" },
-    { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "einops" },
     { name = "evaluate" },
@@ -2191,10 +2199,16 @@ dependencies = [
     { name = "scipy" },
     { name = "setuptools" },
     { name = "torch" },
+    { name = "torch-cluster" },
     { name = "torch-geometric" },
     { name = "tqdm" },
     { name = "transformers" },
     { name = "umap-learn" },
+]
+
+[package.optional-dependencies]
+cuda = [
+    { name = "bitsandbytes" },
 ]
 
 [package.dev-dependencies]
@@ -2206,7 +2220,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.10.1" },
     { name = "biopython", specifier = ">=1.85" },
-    { name = "bitsandbytes", specifier = ">=0.47.0" },
+    { name = "bitsandbytes", marker = "extra == 'cuda'" },
     { name = "datasets", specifier = ">=4.0.0" },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "evaluate", specifier = ">=0.4.5" },
@@ -2222,11 +2236,13 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.11.4" },
     { name = "setuptools", specifier = ">=80.9.0" },
     { name = "torch", specifier = ">=2.8.0" },
+    { name = "torch-cluster", specifier = ">=1.6.3" },
     { name = "torch-geometric", specifier = ">=2.6.1" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "transformers", specifier = ">=4.56.0" },
     { name = "umap-learn", specifier = ">=0.5.9.post2" },
 ]
+provides-extras = ["cuda"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ipython", specifier = ">=9.5.0" }]

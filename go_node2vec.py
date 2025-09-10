@@ -8,6 +8,8 @@ import torch
 from tqdm import tqdm
 from torch_geometric.nn.models import Node2Vec
 import multiprocessing
+import sys
+
 
 N_PROC = multiprocessing.cpu_count()
 
@@ -143,7 +145,6 @@ def train_node2vec(
     lr=0.01,
     num_nodes: int | None = None,
 ):
-    """Train PyG Node2Vec; returns embedding matrix (num_nodes, dim)."""
     if device is None:
         device = (
             "cuda"
@@ -162,7 +163,15 @@ def train_node2vec(
         sparse=True,
     ).to(device)
 
-    loader = model.loader(batch_size=batch_size, shuffle=True, num_workers=N_PROC)
+    num_workers = 0 if sys.platform == "darwin" else min(4, N_PROC)
+    loader = model.loader(
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        persistent_workers=False,
+        pin_memory=(device == "cuda"),
+    )
+
     opt = torch.optim.SparseAdam(list(model.parameters()), lr=lr)
 
     model.train()
