@@ -7,20 +7,6 @@ Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicit
 
 Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from two sources: a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and a [node2vec](https://en.wikipedia.org/wiki/Node2vec) embedding over the [Gene Ontology](https://www.geneontology.org/).
 
-## Input
-
-- [Gene Association File](https://current.geneontology.org/annotations/goa_human.gaf.gz)
-- [Gene Ontology JSON](https://purl.obolibrary.org/obo/go.json)
-- [ClinVar variant summary](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz)
-- [GRCh38 fna](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz)
-
-To download them you can use:
-
-```bash
-mkdir -p data/raw/
-wget -i sources.txt -P data/raw/
-```
-
 ## Intuition and basic idea
 
 PathoLens separates “feature extraction” from “decision making.” The feature extractor produces a compact numeric summary of the variant: a nucleotide-transformer difference vector (`dna_alt – dna_ref`) that approximates local sequence perturbation, concatenated with a node2vec embedding of the gene’s GO neighborhood. This joint vector is projected into a small set of *virtual tokens* that are prepended to the natural-language prompt. A decoder-only LLM is then fine-tuned (via LoRA) to read those tokens alongside a short textual context (gene symbol, HGVS, coarse consequence heuristics) and emit a single-word label.
@@ -40,6 +26,22 @@ In fact, why this could *not* work:
 
 The sequence→effect mapping is also mediated by layers the model does not see: isoform usage, long-range regulation and 3D chromatin, cell-type–specific epigenetic state, dosage sensitivity and mechanism (loss- vs gain-of-function), domain-level biophysics, and gene–gene compensation. Even “obvious” cues are unreliable in isolation. Nonsense can be tolerated; missense depends on structural context; splice effects hinge on unseen factors. In addition, ClinVar adds its own noise and bias (ascertainment toward extremes, disease-specific labeling). Compressing all of this to local sequence plus a coarse GO prior is unlikely to resolve the borderline or mechanism-dependent examples that matter clinically.
 
+## Input
+
+- [Gene Association File](https://current.geneontology.org/annotations/goa_human.gaf.gz)
+- [Gene Ontology JSON](https://purl.obolibrary.org/obo/go.json)
+- [ClinVar variant summary](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz)
+- [GRCh38 fna](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz)
+
+To download them you can use:
+
+```bash
+mkdir -p data/raw/
+wget -i sources.txt -P data/raw/
+```
+
+In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
+
 ## Data and splits
 
 We restrict to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
@@ -47,7 +49,7 @@ We restrict to GRCh38 and ClinVar assertions with “criteria provided, multiple
 ## Implementation
 
 ### GO embedding (Gene Ontology)
-We derive **gene-level embeddings** from a heterogeneous GO graph constructed from the **Gene Annotation File (GAF)**. Nodes represent genes and GO terms; edges connect each human gene (taxon 9606) to the GO terms it is annotated with, after removing `NOT` qualifiers and, optionally, restricting to curated evidence codes. To inject hierarchical context, the graph also includes GO **term–term** links limited to `is_a` and `part_of` relations parsed from the GO graph. To reduce hub effects and trivial shortcuts, the three GO root terms are dropped and very high-degree term nodes can be pruned; any isolates created by pruning are removed. A Node2Vec model is then trained on this graph, and only the gene embeddings are retained and L2-normalized. These vectors summarize each gene’s neighborhood in GO.
+We derive **gene-level embeddings** from a heterogeneous GO graph constructed from the Gene Annotation File (GAF). Nodes represent genes and GO terms; edges connect each human gene (taxon 9606) to the GO terms it is annotated with, after removing `NOT` qualifiers and, optionally, restricting to curated evidence codes. To inject hierarchical context, the graph also includes GO **term–term** links limited to `is_a` and `part_of` relations parsed from the GO graph. To reduce hub effects and trivial shortcuts, the three GO root terms are dropped and very high-degree term nodes can be pruned; any isolates created by pruning are removed. A Node2Vec model is then trained on this graph, and only the gene embeddings are retained and L2-normalized. These vectors summarize each gene’s neighborhood in GO.
 
 
 ### DNA embedding (reference/alternate FASTA windows)
