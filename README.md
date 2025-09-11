@@ -26,27 +26,11 @@ In fact, why this could *not* work:
 
 The sequence→effect mapping is also mediated by layers the model does not see: isoform usage, long-range regulation and 3D chromatin, cell-type–specific epigenetic state, gene–gene compensation, etc. Even “obvious” cues are unreliable in isolation. Nonsense can be tolerated; missense depends on structural context; splice effects hinge on unseen factors. In addition, ClinVar adds its own noise and bias (ascertainment toward extremes, disease-specific labeling). Compressing all of this to local sequence plus a coarse GO prior is unlikely to resolve the borderline or mechanism-dependent examples that matter clinically.
 
-## Input
-
-- [Gene Association File](https://current.geneontology.org/annotations/goa_human.gaf.gz)
-- [Gene Ontology JSON](https://purl.obolibrary.org/obo/go.json)
-- [ClinVar variant summary](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz)
-- [GRCh38 fna](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz)
-
-To download them you can use:
-
-```bash
-mkdir -p data/raw/
-wget -i sources.txt -P data/raw/
-```
-
-In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
-
-## Data and splits
+## Implementation
+### Data and splits
 
 We restrict to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
 
-## Implementation
 
 ### GO embedding (Gene Ontology)
 We derive **gene-level embeddings** from a heterogeneous GO graph constructed from the Gene Annotation File (GAF). Nodes represent genes and GO terms; edges connect each human gene (taxon 9606) to the GO terms it is annotated with, after removing `NOT` qualifiers and, optionally, restricting to curated evidence codes. To inject hierarchical context, the graph also includes GO **term–term** links limited to `is_a` and `part_of` relations parsed from the GO graph. To reduce hub effects and trivial shortcuts, the three GO root terms are dropped and very high-degree term nodes can be pruned; any isolates created by pruning are removed. A Node2Vec model is then trained on this graph, and only the gene embeddings are retained and L2-normalized. These vectors summarize each gene’s neighborhood in GO.
@@ -93,14 +77,33 @@ Results are reported on the held-out **test split** (N = 33,115 variants). Posit
 
 
 ## Set-up and training
-First make sure you have downloaded all the required files.
+### Input
 
-Install the dependencies via [uv](https://docs.astral.sh/uv/).
+- [Gene Association File](https://current.geneontology.org/annotations/goa_human.gaf.gz)
+- [Gene Ontology JSON](https://purl.obolibrary.org/obo/go.json)
+- [ClinVar variant summary](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz)
+- [GRCh38 fna](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz)
 
-``` bash
-uv pip install '.[cuda]'
+To download them you can use:
+
+```bash
+mkdir -p data/raw/
+wget -i sources.txt -P data/raw/
 ```
 
+In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
+
+
+### Dependencies
+Install the dependencies via [uv](https://docs.astral.sh/uv/) and activate the venv.
+
+``` bash
+uv sync
+uv pip install '.[cuda]'
+source .venv/bin/activate
+```
+
+### Training & Evaluation
 Next generate the GO node2vec embeddings:
 
 ``` bash
@@ -119,13 +122,13 @@ python go_node2vec.py \
   --prune-term-degree 200
 ```
 If it complains `ImportError: 'Node2Vec' requires either the 'pyg-lib' or 'torch-cluster' package` try to install either.
-For example:
+Depending on your machine and configuration one of them should work, unfortunately it turned out to be somewhat of a hassle with the dependencies so you may need to experiment. For example, this seemed to work, but might not on your machine:
 
 ``` bash
 uv pip install pyg-lib -f https://data.pyg.org/whl/torch-2.8.0+cu129.html
 ```
 
-Then generate the data and run the LLM fine-tune, which also calls the full evaluation.
+Then generate the intermediate data and run the LLM fine-tune, which also calls the full evaluation.
 
 ``` bash
 python train.py
