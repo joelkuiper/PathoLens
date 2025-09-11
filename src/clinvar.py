@@ -24,6 +24,18 @@ CLINVAR_COLS = [
 POS = {"pathogenic", "likely pathogenic", "pathogenic/likely pathogenic"}
 NEG = {"benign", "likely benign", "benign/likely benign"}
 
+
+def clinsig_to_binary(cs: str | None) -> int | None:
+    if not isinstance(cs, str):
+        return None
+    s = cs.strip().lower()
+    if s in POS:
+        return 1
+    if s in NEG:
+        return 0
+    return None
+
+
 # ============================================================
 # ClinVar Name/GeneSymbol parsers (ONLY these two fields)
 # ============================================================

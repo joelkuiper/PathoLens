@@ -141,110 +141,105 @@ def _make_label_prefix_fn(tokenizer):
     return fn
 
 
+from transformers import GenerationConfig
+
+
 @torch.inference_mode()
-def generate_rationale_then_label(
+def generate_label_then_rationale(
     model,
     tokenizer,
     user_ctx_text: str,
     cond_vec_np: np.ndarray,
     *,
     rationale_tokens: int = 64,
-    label_tokens: int = 6,
-    rationale_temp: float = 0.5,
+    rationale_temp: float = 0.7,
     rationale_top_p: float = 0.9,
+    ban_label_in_rationale: bool = True,
 ):
+    """
+    1) Predict label (teacher-forced scoring).
+    2) Ask for a one-sentence explanation for that label.
+
+    Returns: {
+      "label": "Benign" | "Pathogenic",
+      "probs": {"Benign": p0, "Pathogenic": p1},
+      "logprobs": {...},
+      "rationale": <str>,               # may be empty
+      "raw_rationale": <str>,           # before sanitization
+    }
+    """
+    # ---- Pass 1: score label probabilities (deterministic) ----
+    label_out = predict_label_with_probs(model, tokenizer, user_ctx_text, cond_vec_np)
+    label = label_out["label"]
+
+    # ---- Pass 2: generate rationale conditioned on predicted label ----
     dev = next(model.parameters()).device
 
-    def _embeds_for(user_text: str):
-        msgs = [
-            {"role": "system", "content": CHAT_SYSTEM},
-            {
-                "role": "user",
-                "content": f"{user_text}\n\nGive a one-sentence rationale ONLY. Do not output the final label.",
-            },
-        ]
-        chat = tokenizer.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=True
-        )
-        enc = tokenizer([chat], return_tensors="pt").to(dev)
-        txt_emb = model.get_input_embeddings()(enc["input_ids"])
-        cond = cond_vec_np.astype("float32")
-        cond /= np.linalg.norm(cond) + 1e-6
-        cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb.dtype)
-        cond_emb = model.cond_projector(cond)
-        inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
-        attn = enc["attention_mask"]
-        K = cond_emb.size(1)
-        ones = torch.ones((attn.size(0), K), dtype=attn.dtype, device=attn.device)
-        attn = torch.cat([ones, attn], dim=1)
-        return inputs_embeds, attn
+    msgs = [
+        {"role": "system", "content": CHAT_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"{user_ctx_text}\n\n"
+                f"Predicted label: {label}.\n"
+                "Explain in one short sentence why this label is plausible, "
+                "using cues from the context (gene, HGVS, consequence). "
+                "Do not restate the label word; focus on mechanism."
+            ),
+        },
+    ]
+    chat = tokenizer.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True
+    )
+    enc = tokenizer([chat], return_tensors="pt").to(dev)
 
-    # Pass 1: rationale (ban label words)
-    inp_emb, attn = _embeds_for(user_ctx_text)
-    bad_ids = _bad_words_ids(tokenizer, ["Benign", "Pathogenic"])
-    gen_rat = model.generate(
-        inputs_embeds=inp_emb,
-        attention_mask=attn,
+    txt_emb = model.get_input_embeddings()(enc["input_ids"])  # [1, T, H]
+
+    cond = cond_vec_np.astype("float32")
+    cond /= np.linalg.norm(cond) + 1e-6
+    cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb.dtype)  # [1, D]
+    cond_emb = model.cond_projector(cond)  # [1, K, H]
+
+    inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
+    attn = enc["attention_mask"]
+    K = cond_emb.size(1)
+    ones = torch.ones((attn.size(0), K), dtype=attn.dtype, device=attn.device)
+    attn = torch.cat([ones, attn], dim=1)
+
+    # Ensure sampling flags actually apply
+    gen_cfg = GenerationConfig(
         do_sample=True,
         temperature=rationale_temp,
         top_p=rationale_top_p,
         max_new_tokens=rationale_tokens,
-        bad_words_ids=bad_ids,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
-    rationale_raw = tokenizer.decode(gen_rat[0], skip_special_tokens=True)
+
+    bad_ids = (
+        _bad_words_ids(tokenizer, ["Benign", "Pathogenic"])
+        if ban_label_in_rationale
+        else None
+    )
+
+    gen_ids = model.generate(
+        inputs_embeds=inputs_embeds,
+        attention_mask=attn,
+        generation_config=gen_cfg,
+        bad_words_ids=bad_ids,
+    )
+    rationale_raw = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
     rationale = sanitize_model_text(rationale_raw)
 
-    # Pass 2: label (prefix-constrained)
-    msgs_lbl = [
-        {"role": "system", "content": CHAT_SYSTEM},
-        {
-            "role": "user",
-            "content": f"{user_ctx_text}\n\nRationale: {rationale}\n\nNow output ONLY one word: Benign or Pathogenic.",
-        },
-    ]
-    chat_lbl = tokenizer.apply_chat_template(
-        msgs_lbl, tokenize=False, add_generation_prompt=True
-    )
-    enc_lbl = tokenizer([chat_lbl], return_tensors="pt").to(dev)
-    txt_emb_lbl = model.get_input_embeddings()(enc_lbl["input_ids"])
-    cond = cond_vec_np.astype("float32")
-    cond /= np.linalg.norm(cond) + 1e-6
-    cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb_lbl.dtype)
-    cond_emb = model.cond_projector(cond)
-    inputs_embeds_lbl = torch.cat([cond_emb, txt_emb_lbl], dim=1)
-    attn_lbl = enc_lbl["attention_mask"]
-    K = cond_emb.size(1)
-    ones = torch.ones(
-        (attn_lbl.size(0), K), dtype=attn_lbl.dtype, device=attn_lbl.device
-    )
-    attn_lbl = torch.cat([ones, attn_lbl], dim=1)
-
-    prefix_fn = _make_label_prefix_fn(tokenizer)
-    cap = getattr(prefix_fn, "_target_len", 6)
-    gen_lab = model.generate(
-        inputs_embeds=inputs_embeds_lbl,
-        attention_mask=attn_lbl,
-        do_sample=False,
-        max_new_tokens=min(label_tokens, cap),
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-        prefix_allowed_tokens_fn=prefix_fn,
-    )
-    label_raw = tokenizer.decode(gen_lab[0], skip_special_tokens=True)
-    label_txt = sanitize_model_text(label_raw)
-    if "Pathogenic" in label_txt:
-        label = "Pathogenic"
-    elif "Benign" in label_txt:
-        label = "Benign"
-    else:
-        label = "Pathogenic" if "Patho" in label_txt else "Benign"
+    # Optional: if the model only produced whitespace or nothing useful, keep it empty
+    if rationale.strip().lower() in {"", "n/a", "no rationale"}:
+        rationale = ""
 
     return {
         "label": label,
+        "probs": label_out["probs"],
+        "logprobs": label_out["logprobs"],
         "rationale": rationale,
-        "raw_label": label_raw,
         "raw_rationale": rationale_raw,
     }
 
@@ -314,98 +309,3 @@ def quick_eval_pathogenicity_binary(
         "report": report,
         "samples": examples,
     }
-
-
-# ---- Tiny inference smoke (optionally shows rationale) ----
-def quick_smoke_generate_labels(seq_ds, out_dir, n=8, seed=0, with_rationale=True):
-    from collections import Counter
-    import os
-    from .load import load_finetuned_model
-
-    rng = np.random.default_rng(seed)
-
-    adapter_dir = os.path.join(out_dir, "adapter")
-    projector_path = os.path.join(out_dir, "projector.pt")
-    D_cond = seq_ds["train"].D_eff + seq_ds["train"].D_go
-
-    tok, model = load_finetuned_model(
-        model_id="Qwen/Qwen3-4B-Instruct-2507",
-        D_cond=D_cond,
-        adapter_dir=adapter_dir,
-        projector_path=projector_path,
-    )
-    enable_fast_generate(model, tok)
-
-    val = seq_ds["val"]
-    idxs = rng.choice(len(val), size=min(n, len(val)), replace=False).tolist()
-
-    preds = []
-    for i in idxs:
-        x, _, _ = val[i]
-        cond = x.numpy()
-        row = val.meta.iloc[i]
-        y = row.get("_y", None)
-        y = int(y) if y is not None else None
-        ctx = row.get("context", "")
-        prompt = f"Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
-
-        if with_rationale:
-            out = generate_rationale_then_label(
-                model,
-                tok,
-                prompt,
-                cond,
-                rationale_tokens=64,
-                label_tokens=6,
-                rationale_temp=0.5,
-                rationale_top_p=0.9,
-            )
-            label, rat = out["label"], out["rationale"]
-        else:
-            # label-only constrained decode
-            msgs = [
-                {"role": "system", "content": CHAT_SYSTEM},
-                {
-                    "role": "user",
-                    "content": f"{prompt}\n\nOutput ONLY one word: Benign or Pathogenic.",
-                },
-            ]
-            chat = tok.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True
-            )
-            enc = tok([chat], return_tensors="pt").to(next(model.parameters()).device)
-            txt_emb = model.get_input_embeddings()(enc["input_ids"])
-            condf = cond.astype("float32")
-            condf /= np.linalg.norm(condf) + 1e-6
-            condf = (
-                torch.from_numpy(condf)
-                .unsqueeze(0)
-                .to(txt_emb.device, dtype=txt_emb.dtype)
-            )
-            cond_emb = model.cond_projector(condf)
-            inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
-            attn = enc["attention_mask"]
-            K = cond_emb.size(1)
-            ones = torch.ones((attn.size(0), K), dtype=attn.dtype, device=attn.device)
-            attn = torch.cat([ones, attn], dim=1)
-            prefix_fn = _make_label_prefix_fn(tok)
-            gen = model.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attn,
-                do_sample=False,
-                max_new_tokens=min(6, getattr(prefix_fn, "_target_len", 6)),
-                eos_token_id=tok.eos_token_id,
-                pad_token_id=tok.pad_token_id,
-                prefix_allowed_tokens_fn=prefix_fn,
-            )
-            raw = tok.decode(gen[0], skip_special_tokens=True)
-            out_txt = sanitize_model_text(raw)
-            label = "Pathogenic" if "Pathogenic" in out_txt else "Benign"
-            rat = ""
-
-        preds.append((i, y, label, rat))
-
-    print("[SMOKE] Pred label counts:", Counter([p[2] for p in preds]))
-    for i, y, label, rat in preds:
-        print(f"- idx={i} truth={y} pred={label}  rationale[:120]={rat[:120]!r}")
-    return {"n": len(preds), "preds": preds}

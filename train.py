@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from torch.utils.data import DataLoader
 
 from src.dna_utils import (
     load_fasta,
@@ -170,35 +169,6 @@ def build_seq_datasets(cfg: RunCfg):
     return seq
 
 
-def loaders_for_seq(seq_ds: dict[str, "SequenceTowerDataset"], cfg: RunCfg):
-    return {
-        "train": DataLoader(
-            seq_ds["train"],
-            batch_size=cfg.train_bs_seq,
-            shuffle=True,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            collate_fn=collate_seq,
-        ),
-        "val": DataLoader(
-            seq_ds["val"],
-            batch_size=cfg.train_bs_seq,
-            shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            collate_fn=collate_seq,
-        ),
-        "test": DataLoader(
-            seq_ds["test"],
-            batch_size=cfg.train_bs_seq,
-            shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            collate_fn=collate_seq,
-        ),
-    }
-
-
 def main():
     # --- setup ---
     device = get_device()
@@ -223,7 +193,6 @@ def main():
 
     # --- 3) Datasets & loaders ---
     seq_ds = build_seq_datasets(cfg)
-    loaders_seq = loaders_for_seq(seq_ds, cfg)
 
     # --- 4) LLM: Qwen QLoRA with a virtual token conditioned on [DNA ⊕ GO] ---
     from src.llm.train import run_llm_pipeline
