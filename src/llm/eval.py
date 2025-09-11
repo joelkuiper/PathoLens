@@ -5,11 +5,59 @@ import os, numpy as np, torch
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 
-from src.llm.config import CHAT_SYSTEM, PROMPT_TMPL
+from src.llm.config import CHAT_SYSTEM, PROMPT_TMPL, BIN_LABELS
 from src.llm.load import load_finetuned_model
 from src.llm.modeling import enable_fast_generate
 
-from src.clinvar import build_context, clinsig_to_binary
+from src.clinvar import (
+    pick_gene,
+    extract_hgvsc,
+    extract_hgvsp,
+    classify_protein_change,
+    parse_hgvsc_features,
+)
+
+
+def build_ctx_from_row(row) -> str:
+    # Use precomputed context if present; otherwise reconstruct minimal context
+    ctx = row.get("context", "")
+    if isinstance(ctx, str) and ctx.strip():
+        return ctx
+
+    name = row.get("Name", "") or ""
+    gene = pick_gene(row)
+    hgvsc = extract_hgvsc(name)
+    hgvsp = extract_hgvsp(name)
+    pcls = classify_protein_change(hgvsp)
+    cfeat = parse_hgvsc_features(hgvsc)
+
+    lines: List[str] = []
+    if gene:
+        lines.append(f"Gene: {gene}")
+    if hgvsc:
+        lines.append(f"HGVS.c: {hgvsc}")
+    if hgvsp:
+        lines.append(f"HGVS.p: {hgvsp}")
+    cons = pcls or (
+        "splice"
+        if cfeat["splice"]
+        else (cfeat["kind"] if cfeat["kind"] != "other" else "")
+    )
+    if cons:
+        lines.append(f"Consequence: {cons}")
+    if cfeat["region"] != "unknown":
+        lines.append(f"Region: {cfeat['region']}")
+    if cfeat["splice"]:
+        lines.append("Splice-site: yes")
+    if cfeat["indel_len"] > 0:
+        lines.append(f"Indel length: {cfeat['indel_len']}")
+    if cfeat["frameshift_guess"] is not None:
+        lines.append(
+            f"Frameshift (heuristic): {'yes' if cfeat['frameshift_guess'] else 'no'}"
+        )
+    if cfeat["snv_change"]:
+        lines.append(f"SNV change: {cfeat['snv_change']}")
+    return "\n".join(lines) if lines else "Variant context provided."
 
 
 def sanitize_model_text(text: str) -> str:
@@ -174,7 +222,7 @@ def evaluate_split_batched(
     if guard_prompts:
         leaks = 0
         for i in idxs[: min(2000, len(idxs))]:
-            p = PROMPT_TMPL.format(ctx=build_context(ds.meta.iloc[i]))
+            p = PROMPT_TMPL.format(ctx=build_ctx_from_row(ds.meta.iloc[i]))
             if ("Benign" in p) or ("Pathogenic" in p):
                 leaks += 1
         assert leaks == 0, f"Prompt leakage: {leaks} prompts include label words."
@@ -362,7 +410,7 @@ def evaluate_split_batched(
             x, _, _ = ds[i]
             cond_vec = x.numpy()
             row = ds.meta.iloc[i]
-            ctx = build_context(row)
+            ctx = build_ctx_from_row(row)
             prompt = PROMPT_TMPL.format(ctx=ctx)
 
             # decide predicted label quickly
