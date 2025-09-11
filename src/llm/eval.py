@@ -5,89 +5,11 @@ import os, numpy as np, torch
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 
-# -----------------------
-# Minimal imports from your repo (model I/O only)
-# -----------------------
+from src.llm.config import CHAT_SYSTEM, PROMPT_TMPL
 from src.llm.load import load_finetuned_model
 from src.llm.modeling import enable_fast_generate
 
-# Structured parsing used by the old builder:
-from src.clinvar import (
-    pick_gene,
-    extract_hgvsc,
-    extract_hgvsp,
-    classify_protein_change,
-    parse_hgvsc_features,
-)
-
-# -----------------------
-# Constants (kept local to match eval_old exactly)
-# -----------------------
-BIN_LABELS = ["Benign", "Pathogenic"]
-POS = {"pathogenic", "likely pathogenic", "pathogenic/likely pathogenic"}
-NEG = {"benign", "likely benign", "benign/likely benign"}
-
-
-def clinsig_to_binary(cs: str | None) -> int | None:
-    if not isinstance(cs, str):
-        return None
-    s = cs.strip().lower()
-    if s in POS:
-        return 1
-    if s in NEG:
-        return 0
-    return None
-
-
-CHAT_SYSTEM = """You are a concise genetics assistant specializing in variant-level reasoning from minimal context.
-
-Your job: estimate clinical significance as a binary label from the given features.
-
-Output format: write ONLY the label word, exactly one of:
-Benign
-Pathogenic
-(no punctuation, no quotes, no extra text)
-"""
-
-PROMPT_TMPL = "Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
-
-
-def build_ctx_from_row(row) -> str:
-    # This matches eval_old: prefer reconstructing from structured fields.
-    name = row.get("Name", "") or ""
-    gene = pick_gene(row)
-    hgvsc = extract_hgvsc(name)
-    hgvsp = extract_hgvsp(name)
-    pcls = classify_protein_change(hgvsp)
-    cfeat = parse_hgvsc_features(hgvsc)
-
-    lines: List[str] = []
-    if gene:
-        lines.append(f"Gene: {gene}")
-    if hgvsc:
-        lines.append(f"HGVS.c: {hgvsc}")
-    if hgvsp:
-        lines.append(f"HGVS.p: {hgvsp}")
-    cons = pcls or (
-        "splice"
-        if cfeat["splice"]
-        else (cfeat["kind"] if cfeat["kind"] != "other" else "")
-    )
-    if cons:
-        lines.append(f"Consequence: {cons}")
-    if cfeat["region"] != "unknown":
-        lines.append(f"Region: {cfeat['region']}")
-    if cfeat["splice"]:
-        lines.append("Splice-site: yes")
-    if cfeat["indel_len"] > 0:
-        lines.append(f"Indel length: {cfeat['indel_len']}")
-    if cfeat["frameshift_guess"] is not None:
-        lines.append(
-            f"Frameshift (heuristic): {'yes' if cfeat['frameshift_guess'] else 'no'}"
-        )
-    if cfeat["snv_change"]:
-        lines.append(f"SNV change: {cfeat['snv_change']}")
-    return "\n".join(lines) if lines else "Variant context provided."
+from src.clinvar import build_context, clinsig_to_binary
 
 
 def sanitize_model_text(text: str) -> str:
@@ -100,7 +22,7 @@ def sanitize_model_text(text: str) -> str:
 
 
 # -----------------------
-# Tokenizer helpers (kept local)
+# Tokenizer helpers
 # -----------------------
 def _encode_label_variants(tokenizer, word: str):
     a = tokenizer.encode(word, add_special_tokens=False)
@@ -252,7 +174,7 @@ def evaluate_split_batched(
     if guard_prompts:
         leaks = 0
         for i in idxs[: min(2000, len(idxs))]:
-            p = PROMPT_TMPL.format(ctx=build_ctx_from_row(ds.meta.iloc[i]))
+            p = PROMPT_TMPL.format(ctx=build_context(ds.meta.iloc[i]))
             if ("Benign" in p) or ("Pathogenic" in p):
                 leaks += 1
         assert leaks == 0, f"Prompt leakage: {leaks} prompts include label words."
@@ -440,7 +362,7 @@ def evaluate_split_batched(
             x, _, _ = ds[i]
             cond_vec = x.numpy()
             row = ds.meta.iloc[i]
-            ctx = build_ctx_from_row(row)
+            ctx = build_context(row)
             prompt = PROMPT_TMPL.format(ctx=ctx)
 
             # decide predicted label quickly
