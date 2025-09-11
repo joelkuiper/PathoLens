@@ -211,10 +211,9 @@ def main():
         balanced_sampling=True,  # uses WeightedRandomSampler
     )
 
-    from src.llm.infer import quick_smoke_generate_labels
+    import src.llm.eval as llm_eval
 
-    quick_smoke_generate_labels(seq_ds, llm_out_dir, n=8, with_rationale=True)
-    print("LLM eval:", llm_res["eval"])
+    llm_eval.run_all(seq_ds, out_dir=llm_out_dir)
 
 
 if __name__ == "__main__":

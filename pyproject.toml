@@ -22,7 +22,6 @@ dependencies = [
     "scipy>=1.11.4",
     "setuptools>=80.9.0",
     "torch>=2.8.0",
-    "torch-cluster>=1.6.3",
     "torch-geometric>=2.6.1",
     "tqdm>=4.67.1",
     "transformers>=4.56.0",

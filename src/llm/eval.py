@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 # Batched evaluation (compat with eval_old prompt path) + AUC + feather + optional label→rationale.
+# Notes:
+# - Ground truth is NEVER inserted into prompts or scoring. It is read only to compute metrics.
+# - Rationales are generated AFTER predicting the label, and are conditioned on the PREDICTED label only.
+# - LoRA + conditioning projector remain active for both scoring and rationale generation.
 
-import os, numpy as np, torch
+import os, re
+import numpy as np
+import torch
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 
@@ -18,8 +24,10 @@ from src.clinvar import (
 )
 
 
+# -----------------------
+# Context building & hygiene
+# -----------------------
 def build_ctx_from_row(row) -> str:
-    # Use precomputed context if present; otherwise reconstruct minimal context
     ctx = row.get("context", "")
     if isinstance(ctx, str) and ctx.strip():
         return ctx
@@ -70,7 +78,7 @@ def sanitize_model_text(text: str) -> str:
 
 
 # -----------------------
-# Tokenizer helpers
+# Tokenizer helpers (label variants + chat)
 # -----------------------
 def _encode_label_variants(tokenizer, word: str):
     a = tokenizer.encode(word, add_special_tokens=False)
@@ -133,35 +141,144 @@ def _batched_label_logprobs(
 ) -> np.ndarray:
     """
     Teacher-forced scoring on the PROMPT side (append candidate label tokens
-    to prompt+cond embeddings; score next-token logprobs). This is the robust path
-    that matched your eval_old implementation.
+    to prompt+cond embeddings; score next-token logprobs). Matches eval_old.
     """
     dev = inputs_embeds.device
     E = model.get_input_embeddings()
     ids = torch.tensor([label_ids], device=dev)  # [1,L]
-    emb = E(ids)  # [1,L,H]
-    B = inputs_embeds.size(0)
-    emb = emb.expand(B, -1, -1)
+    emb = E(ids).expand(inputs_embeds.size(0), -1, -1)  # [B,L,H]
 
     full_emb = torch.cat([inputs_embeds, emb], dim=1)
     L = emb.size(1)
     full_attn = torch.cat(
-        [attn, torch.ones((B, L), dtype=attn.dtype, device=attn.device)], dim=1
+        [attn, torch.ones((attn.size(0), L), dtype=attn.dtype, device=attn.device)],
+        dim=1,
     )
 
     out = model(inputs_embeds=full_emb, attention_mask=full_attn, use_cache=False)
     logits = out.logits  # [B, S+L, V]
 
-    label_logits = logits[:, -L - 1 : -1, :]
+    label_logits = logits[:, -L - 1 : -1, :]  # next-token scores over label span
     logprobs = torch.log_softmax(label_logits, dim=-1)  # [B,L,V]
-    ids_batch = ids.expand(B, -1)  # [B,L]
+    ids_batch = ids.expand(inputs_embeds.size(0), -1)  # [B,L]
     token_lp = logprobs.gather(-1, ids_batch.unsqueeze(-1)).squeeze(-1)  # [B,L]
-    lp = token_lp.sum(dim=1)  # [B]
-    return lp.detach().float().cpu().numpy()
+    return token_lp.sum(dim=1).detach().float().cpu().numpy()  # [B]
 
 
 # -----------------------
-# Main evaluator (compat)
+# Rationale helpers (LoRA kept ON, assistant-seeded with " Because")
+# -----------------------
+def _light_badwords_for_labels(tok) -> list[list[int]]:
+    out = []
+    for w in ("Benign", "Pathogenic"):
+        for form in (w, " " + w):
+            ids = tok.encode(form, add_special_tokens=False)
+            if ids:
+                out.append(ids)
+    return out
+
+
+def _rationale_instruction_for(label_word: str) -> str:
+    # Use synonyms so we don't introduce the literal label tokens.
+    if label_word == "Pathogenic":
+        hint = "deleterious (disease-causing)"
+    else:
+        hint = "tolerated/neutral (not disease-causing)"
+    return (
+        f"Assume the predicted class is {hint}. "
+        "Write one short sentence explaining why this classification is plausible based only on the given features. "
+        "Do not use the words 'Benign' or 'Pathogenic'."
+    )
+
+
+@torch.inference_mode()
+def _generate_rationale_with_seed(
+    model,
+    tok,
+    user_prompt: str,
+    cond_vec: np.ndarray,
+    label_word: str,
+    *,
+    seed_text: str = " Because",
+    temperature: float = 0.9,
+    top_p: float = 0.92,
+    max_new_tokens: int = 48,
+    min_new_tokens: int = 12,
+    repetition_penalty: float = 1.05,
+) -> str:
+    """Generate a one-sentence rationale while LoRA + conditioning are active.
+    We prepend the cond embeddings, then the chat prompt, then an ASSISTANT-PREFIX
+    embedding for `seed_text` so decoding starts after that seed.
+    """
+    dev = next(model.parameters()).device
+    msgs = [
+        {"role": "system", "content": CHAT_SYSTEM},
+        {
+            "role": "user",
+            "content": f"{user_prompt}\n\n{_rationale_instruction_for(label_word)}\nRationale:",
+        },
+    ]
+    chat = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    enc = tok([chat], return_tensors="pt").to(dev)
+
+    E = model.get_input_embeddings()
+    txt_emb = E(enc["input_ids"])  # [1,T,H]
+
+    # Cond embeddings
+    v = cond_vec.astype("float32")
+    v /= np.linalg.norm(v) + 1e-6
+    v = torch.from_numpy(v).unsqueeze(0).to(dev, dtype=txt_emb.dtype)  # [1,D]
+    cond_emb = model.cond_projector(v)  # [1,K,H]
+
+    # Assistant prefix seed (e.g., " Because")
+    seed_ids = tok.encode(seed_text, add_special_tokens=False)
+    seed_emb = E(torch.tensor([seed_ids], device=dev)) if seed_ids else None
+
+    # Concatenate: [cond | prompt | seed] → then generate
+    if seed_emb is not None:
+        inputs_embeds = torch.cat([cond_emb, txt_emb, seed_emb], dim=1)
+        seed_len = seed_emb.size(1)
+    else:
+        inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
+        seed_len = 0
+
+    attn = enc["attention_mask"]
+    K = cond_emb.size(1)
+    ones = torch.ones(
+        (attn.size(0), K + seed_len), dtype=attn.dtype, device=attn.device
+    )
+    attn = torch.cat([ones, attn], dim=1)
+
+    bad_words_ids = _light_badwords_for_labels(tok)
+
+    gen = model.generate(
+        inputs_embeds=inputs_embeds,
+        attention_mask=attn,
+        do_sample=True,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=max_new_tokens,
+        min_new_tokens=min_new_tokens,
+        repetition_penalty=repetition_penalty,
+        bad_words_ids=bad_words_ids,
+        eos_token_id=tok.eos_token_id,
+        pad_token_id=tok.pad_token_id,
+    )
+    raw = tok.decode(gen[0], skip_special_tokens=True)
+    txt = sanitize_model_text(raw)
+
+    # Guards: no label words; require a bit of substance. No fallback text.
+    if re.search(r"(?i)\b(benign|pathogenic)\b", txt):
+        return ""
+    if len(txt.strip()) < 10:
+        return ""
+    # Trim if it keeps the seeded "Because" duplicated; keep a single sentence.
+    txt = re.split(r"(?<=[.!?])\s", txt.strip())[0]
+    return txt
+
+
+# -----------------------
+# Main evaluator (compat with eval_old)
 # -----------------------
 @torch.inference_mode()
 def evaluate_split_batched(
@@ -173,15 +290,15 @@ def evaluate_split_batched(
     batch_size: int = 64,
     sample_rationales: int = 0,  # generate AFTER predicting label
     rationale_tokens: int = 48,
-    rationale_temp: float = 0.7,
-    rationale_top_p: float = 0.9,
+    rationale_temp: float = 0.9,
+    rationale_top_p: float = 0.92,
     guard_prompts: bool = True,
 ) -> Dict[str, Any]:
     """
     IMPORTANT: We do NOT insert ground-truth anywhere into the prompt or scoring.
     Ground-truth labels are read only AFTER predictions to compute metrics.
     Rationales (if requested) are generated AFTER label prediction and are
-    conditioned only on the PREDICTED label.
+    conditioned only on the PREDICTED label. LoRA + conditioning remain active.
     """
     from sklearn.metrics import (
         accuracy_score,
@@ -202,23 +319,15 @@ def evaluate_split_batched(
     ds = seq_ds[split]
     N_all = len(ds)
 
-    # Collect labeled idxs WITHOUT touching ground truth later than needed
-    idxs = []
-    for i in range(N_all):
-        row = ds.meta.iloc[i]
-        y = row.get("_y", None)
-        if y is None:
-            y = clinsig_to_binary(row.get("ClinicalSignificance", ""))
-        if y is not None:
-            idxs.append(i)
-
+    # Evaluate all rows (we assume _y is already in meta for scoring)
+    idxs = list(range(N_all))
     if max_n is not None:
         idxs = idxs[:max_n]
     N = len(idxs)
     if N == 0:
-        return {"n": 0, "note": f"No labeled samples in split '{split}'."}
+        return {"n": 0, "note": f"No samples in split '{split}'."}
 
-    # Optional: sanity guard — no label words inside prompts
+    # (Optional) sanity guard: no explicit label words in prompts
     if guard_prompts:
         leaks = 0
         for i in idxs[: min(2000, len(idxs))]:
@@ -238,18 +347,20 @@ def evaluate_split_batched(
     prob_pathogenic: List[float] = []
     examples: List[Dict[str, Any]] = []
 
+    # Batched scoring — matches eval_old path
     for bi in tqdm(range(0, N, batch_size), desc=f"Scoring [{split}]", unit="batch"):
         batch_idxs = idxs[bi : bi + batch_size]
 
         # Build prompts/conds WITHOUT ground-truth
-        prompts, conds = [], []
+        prompts, conds, y_batch = [], [], []
         for i in batch_idxs:
             x, _, _ = ds[i]
             conds.append(x.numpy())
             ctx = build_ctx_from_row(ds.meta.iloc[i])
             prompts.append(PROMPT_TMPL.format(ctx=ctx))
-        conds = np.stack(conds, axis=0)
+            y_batch.append(int(ds.meta.iloc[i]["_y"]))
 
+        conds = np.stack(conds, axis=0)
         inp_emb, attn = _prep_inputs_embeds(model, tok, prompts, conds)
 
         # Teacher-forced label logprobs
@@ -274,15 +385,6 @@ def evaluate_split_batched(
         prob_b = np.exp(lp_b - denom)
         prob_p = np.exp(lp_p - denom)
         yhat_batch = (lp_p > lp_b).astype(np.int32)
-
-        # Now fetch ground-truth ONLY to score
-        y_batch = []
-        for i in batch_idxs:
-            row = ds.meta.iloc[i]
-            y = row.get("_y", None)
-            if y is None:
-                y = clinsig_to_binary(row.get("ClinicalSignificance", ""))
-            y_batch.append(int(y))
 
         y_true.extend(y_batch)
         y_pred.extend(yhat_batch.tolist())
@@ -312,8 +414,6 @@ def evaluate_split_batched(
         y_true, y_pred, labels=[0, 1], target_names=BIN_LABELS, digits=3
     )
     try:
-        from sklearn.metrics import roc_auc_score, average_precision_score
-
         auc_roc = float(roc_auc_score(y_true, prob_pathogenic))
         auc_pr = float(average_precision_score(y_true, prob_pathogenic))
     except Exception:
@@ -347,65 +447,11 @@ def evaluate_split_batched(
         "predictions_path": preds_path,
     }
 
-    # Optional: rationales AFTER prediction, conditioned on the *predicted* label
+    # Optional: rationales AFTER prediction (LoRA ON, cond used)
     if sample_rationales > 0:
         rng = np.random.default_rng(0)
         pool = rng.choice(idxs, size=min(sample_rationales, len(idxs)), replace=False)
         rats = []
-
-        def _gen_rationale(user_ctx: str, cond_vec: np.ndarray, label_word: str) -> str:
-            dev = next(model.parameters()).device
-            msgs = [
-                {"role": "system", "content": CHAT_SYSTEM},
-                {
-                    "role": "user",
-                    "content": f"{user_ctx}\n\nPredicted label: {label_word}.\n"
-                    f"In one sentence, explain why this classification is plausible based only on the given context. "
-                    f"Do not restate the label.",
-                },
-            ]
-            chat = tok.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True
-            )
-            enc = tok([chat], return_tensors="pt").to(dev)
-            E = model.get_input_embeddings()
-            txt_emb = E(enc["input_ids"])
-            v = cond_vec.astype("float32")
-            v = v / (np.linalg.norm(v) + 1e-6)
-            v = torch.from_numpy(v).unsqueeze(0).to(dev, dtype=txt_emb.dtype)
-            cond_emb = model.cond_projector(v)
-            inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
-            attn = enc["attention_mask"]
-            K = cond_emb.size(1)
-            ones = torch.ones((attn.size(0), K), dtype=attn.dtype, device=attn.device)
-            attn = torch.cat([ones, attn], dim=1)
-
-            # Ban label words so it doesn't just echo them
-            bad_words_ids = []
-            for w in ("Benign", "Pathogenic"):
-                a = tok.encode(w, add_special_tokens=False)
-                b = tok.encode(" " + w, add_special_tokens=False)
-                if a:
-                    bad_words_ids.append(a)
-                if b:
-                    bad_words_ids.append(b)
-
-            gen = model.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attn,
-                do_sample=True,
-                temperature=rationale_temp,
-                top_p=rationale_top_p,
-                max_new_tokens=rationale_tokens,
-                bad_words_ids=bad_words_ids,
-                eos_token_id=tok.eos_token_id,
-                pad_token_id=tok.pad_token_id,
-            )
-            raw = tok.decode(gen[0], skip_special_tokens=True)
-            return sanitize_model_text(raw)
-
-        # reuse tokenizer + model from outer scope
-        tok = tok  # explicit, just to be clear this is the same tokenizer
         for i in pool:
             x, _, _ = ds[i]
             cond_vec = x.numpy()
@@ -413,7 +459,7 @@ def evaluate_split_batched(
             ctx = build_ctx_from_row(row)
             prompt = PROMPT_TMPL.format(ctx=ctx)
 
-            # decide predicted label quickly
+            # Decide predicted label (single-item scoring)
             inp_emb, attn = _prep_inputs_embeds(
                 model, tok, [prompt], cond_vec[np.newaxis, :]
             )
@@ -432,9 +478,21 @@ def evaluate_split_batched(
                 default=-1e9,
             )
             label_word = "Pathogenic" if best_p > best_b else "Benign"
-            rat = _gen_rationale(prompt, cond_vec, label_word)
-            rats.append({"idx": int(i), "pred_label": label_word, "rationale": rat})
 
+            rat = _generate_rationale_with_seed(
+                model,
+                tok,
+                prompt,
+                cond_vec,
+                label_word,
+                seed_text=" Because",
+                temperature=rationale_temp,
+                top_p=rationale_top_p,
+                max_new_tokens=rationale_tokens,
+                min_new_tokens=12,
+                repetition_penalty=1.05,
+            )
+            rats.append({"idx": int(i), "pred_label": label_word, "rationale": rat})
         out["rationales"] = rats
 
     return out

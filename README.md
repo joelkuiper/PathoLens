@@ -62,3 +62,74 @@ The final signal is the **normalized effect vector** `dna_eff = normalize(embed(
 The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A small projector (Linear → Tanh) maps the conditioning vector to **K** virtual token embeddings (default **K = 4**), which are prepended to the chat prompt. Fine-tuning uses LoRA on attention and MLP blocks.
 
 The target is the **bare label word** (“Benign” or “Pathogenic”). All prompt tokens are masked, including any `<think>…</think>` block the Qwen chat template inserts; only the label span is supervised, and it up-weights that span during loss computation.
+
+
+## Results (Test set)
+We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits to minimize leakage across splits. The model consumes only a compact conditioning vector (dna_eff ⊕ GO(gene)) and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
+
+Results are reported on the held-out **test split** (N = 33,115 variants). Positive class = **Pathogenic**, negative class = **Benign**.
+
+### Overall performance
+
+| Metric               |      Value |
+|----------------------|-----------:|
+| Accuracy             | **95.99%** |
+| Precision            | **91.39%** |
+| Recall               | **89.95%** |
+| F1                   | **90.67%** |
+| ROC–AUC              | **0.9899** |
+| PR–AUC               | **0.9696** |
+
+  ### Confusion matrix
+
+|                        |    Pred: Benign | Pred: Pathogenic |  Row total |
+| ---------------------- | --------------: | ---------------: | ---------: |
+| **Actual: Benign**     | **25,330** (TN) |     **608** (FP) |     25,938 |
+| **Actual: Pathogenic** |    **721** (FN) |   **6,456** (TP) |      7,177 |
+| **Column total**       |          26,051 |            7,064 | **33,115** |
+
+**Notes.** The model maintains a low false-positive rate (FP = 608; **FPR ≈ 2.34%**) while missing some positives (FN = 721; **FNR ≈ 10.05%**), indicating a slightly conservative bias toward the Benign label unless evidence is strong. The very high ROC–AUC and PR–AUC suggest robust ranking quality across thresholds.
+
+
+
+## Set-up and training
+First make sure you have downloaded all the required files.
+
+Install the dependencies via [uv](https://docs.astral.sh/uv/).
+
+``` bash
+uv pip install '.[cuda]'
+```
+
+Next generate the GO node2vec embeddings:
+
+``` bash
+python go_node2vec.py \
+  --go-json data/raw/go.json \
+  --gaf data/raw/goa_human.gaf.gz \
+  --out-prefix data/processed/go_n2v \
+  --dim 256 \
+  --epochs 20 \
+  --walk-len 40 \
+  --walks-per-node 5 \
+  --ctx-size 5 \
+  --neg-samples 2 \
+  --batch-size 256 \
+  --drop-roots \
+  --prune-term-degree 200
+```
+If it complains `ImportError: 'Node2Vec' requires either the 'pyg-lib' or 'torch-cluster' package` try to install either.
+For example:
+
+``` bash
+uv pip install pyg-lib -f https://data.pyg.org/whl/torch-2.8.0+cu129.html
+```
+
+Then generate the data and run the LLM fine-tune, which also calls the full evaluation.
+
+``` bash
+python train.py
+
+```
+The actual fine-tune takes about 6 hours on an Nvidia RTX 4090, however preparing the data and evaluating adds considerable overhead.
+In total the runtime was about 12 hours, end to end.
