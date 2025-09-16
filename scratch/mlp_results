@@ -1,0 +1,127 @@
+MLP Probe dna+prot
+Config: feat=dna+prot, hidden=256, dropout=0.4051174318552883, epochs=12, bs=4096, lr=0.0005101372957731883, weight_decay=0.00013044923359478217, patience=4, device=cuda, tune_threshold_on=f1, hpo_trials=20, opt_metric=pr, pca_components=None, seed=0
+Best threshold (on val, by f1): 0.6568
+
+[VAL]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.8553   0.8383   0.6916   0.6035   0.8098   0.8667   0.9066   0.8010
+    best   0.8914   0.8288   0.7278   0.7313   0.7243   0.9333   0.9066   0.8010
+Δ(best-0.5): Acc=0.0361  F1=0.0361  ROC=0.0000  PR=0.0000
+
+[TEST]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.8475   0.8364   0.6989   0.6109   0.8166   0.8561   0.9043   0.8103
+    best   0.8839   0.8294   0.7324   0.7315   0.7332   0.9256   0.9043   0.8103
+Δ(best-0.5): Acc=0.0363  F1=0.0334  ROC=0.0000  PR=0.0000
+
+----
+
+MLP Probe dna+prot+go
+Config: feat=dna+prot+go, hidden=256, dropout=0.4940832060967415, epochs=12, bs=4096, lr=0.00233081960760387, weight_decay=5.334137772466672e-06, patience=4, device=cuda, tune_threshold_on=f1, hpo_trials=20, opt_metric=pr, pca_components=None, seed=0
+Best threshold (on val, by f1): 0.6078
+
+[VAL]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.8894   0.8379   0.7315   0.7121   0.7520   0.9239   0.9039   0.8034
+    best   0.9003   0.8285   0.7401   0.7745   0.7087   0.9483   0.9039   0.8034
+Δ(best-0.5): Acc=0.0109  F1=0.0086  ROC=0.0000  PR=0.0000
+
+[TEST]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.8790   0.8344   0.7302   0.7064   0.7556   0.9131   0.9035   0.8106
+    best   0.8900   0.8266   0.7379   0.7627   0.7146   0.9385   0.9035   0.8106
+Δ(best-0.5): Acc=0.0110  F1=0.0077  ROC=0.0000  PR=0.0000
+
+----
+
+MLP Probe prot
+Config: feat=prot, hidden=1024, dropout=0.048049203946981534, epochs=16, bs=4096, lr=0.004560110236961819, weight_decay=1.8402445310508094e-05, patience=4, device=cuda, tune_threshold_on=f1, hpo_trials=20, opt_metric=pr, pca_components=None, seed=0
+Best threshold (on val, by f1): 0.5490
+
+[VAL]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.8408   0.7140   0.5584   0.6284   0.5025   0.9255   0.7348   0.5700
+    best   0.8480   0.7138   0.5636   0.6632   0.4900   0.9377   0.7348   0.5700
+Δ(best-0.5): Acc=0.0072  F1=0.0052  ROC=0.0000  PR=0.0000
+
+[TEST]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.8215   0.6971   0.5370   0.6132   0.4776   0.9166   0.7175   0.5594
+    best   0.8288   0.6961   0.5390   0.6471   0.4619   0.9303   0.7175   0.5594
+Δ(best-0.5): Acc=0.0073  F1=0.0020  ROC=0.0000  PR=0.0000
+
+
+----
+In [11]: out = mlp_test.mlp_probe_plus(seq_ds, "both")
+
+In [12]: mlp_test.print_mlp_probe_summary(out)
+
+MLP Probe
+Config: feat=both, hidden=512, dropout=0.2, epochs=16, bs=8192, lr=0.003, weight_decay=0.0001, patience=4, device=cuda, tune_threshold_on=f1, hpo_trials=0, opt_metric=pr, pca_components=None, seed=0, prot_source=none, prot_dim=None
+Best threshold (on val, by f1): 0.5637
+
+[VAL]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.7555   0.6660   0.4586   0.4121   0.5168   0.8153   0.7207   0.5004
+    best   0.7877   0.6642   0.4638   0.4694   0.4583   0.8702   0.7207   0.5004
+Δ(best-0.5): Acc=0.0322  F1=0.0052  ROC=0.0000  PR=0.0000
+
+[TEST]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.7382   0.6798   0.4884   0.4236   0.5767   0.7828   0.7422   0.5482
+    best   0.7729   0.6772   0.4924   0.4775   0.5082   0.8462   0.7422   0.5482
+Δ(best-0.5): Acc=0.0348  F1=0.0040  ROC=0.0000  PR=0.0000
+
+In [13]: out = mlp_test.mlp_probe_plus(seq_ds, "dna")
+
+In [14]: mlp_test.print_mlp_probe_summary(out)
+
+MLP Probe
+Config: feat=dna, hidden=512, dropout=0.2, epochs=16, bs=8192, lr=0.003, weight_decay=0.0001, patience=4, device=cuda, tune_threshold_on=f1, hpo_trials=0, opt_metric=pr, pca_components=None, seed=0, prot_source=none, prot_dim=None
+Best threshold (on val, by f1): 0.5882
+
+[VAL]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.7351   0.6523   0.4374   0.3807   0.5140   0.7905   0.7049   0.4959
+    best   0.8036   0.6550   0.4536   0.5124   0.4069   0.9030   0.7049   0.4959
+Δ(best-0.5): Acc=0.0685  F1=0.0162  ROC=0.0000  PR=0.0000
+
+[TEST]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.7347   0.6655   0.4702   0.4145   0.5434   0.7876   0.7231   0.5331
+    best   0.7988   0.6684   0.4856   0.5446   0.4381   0.8986   0.7231   0.5331
+Δ(best-0.5): Acc=0.0642  F1=0.0153  ROC=0.0000  PR=0.0000
+
+In [15]: out = mlp_test.mlp_probe_plus(seq_ds, "go")
+
+In [16]: mlp_test.print_mlp_probe_summary(out)
+
+MLP Probe
+Config: feat=go, hidden=512, dropout=0.2, epochs=16, bs=8192, lr=0.003, weight_decay=0.0001, patience=4, device=cuda, tune_threshold_on=f1, hpo_trials=0, opt_metric=pr, pca_components=None, seed=0, prot_source=none, prot_dim=None
+Best threshold (on val, by f1): 0.2844
+
+[VAL]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.7531   0.6054   0.3681   0.3777   0.3589   0.8518   0.6304   0.3157
+    best   0.5141   0.5960   0.3766   0.2534   0.7327   0.4593   0.6304   0.3157
+Δ(best-0.5): Acc=-0.2390  F1=0.0086  ROC=0.0000  PR=0.0000
+
+[TEST]
+     Thr      Acc   BalAcc       F1     Prec   Recall     Spec      ROC       PR
+--------------------------------------------------------------------------------
+     0.5   0.7087   0.5248   0.2296   0.2689   0.2004   0.8493   0.5694   0.2601
+    best   0.4683   0.5291   0.3416   0.2335   0.6365   0.4218   0.5694   0.2601
+Δ(best-0.5): Acc=-0.2403  F1=0.1120  ROC=0.0000  PR=0.0000
+
+In [17]:

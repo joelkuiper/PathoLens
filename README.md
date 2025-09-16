@@ -93,6 +93,8 @@ wget -i sources.txt -P data/raw/
 
 In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
 
+Note that currently it parses the HGVS symbols from the `Name` field in ClinVar and derives several features from that.
+(see [clinvar.py](./src/clinvar.py)). Ideally this would not be the case.
 
 ### Dependencies
 Install the dependencies via [uv](https://docs.astral.sh/uv/) and activate the venv.
