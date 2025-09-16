@@ -24,7 +24,7 @@ protein_cache = build_protein_caches(
     cfg,
     device,
     splits,
-    vep_cache_dir="/Users/j.kuiper01/vep_cache",
+    vep_cache_dir="/home/joelkuiper/vep_cache",
     vep_fasta_relpath="homo_sapiens/115_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
     image="ensemblorg/ensembl-vep",
     filter_mode="all",  # "protein_changing" / "patchable" / "all"

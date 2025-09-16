@@ -211,10 +211,15 @@ def ensure_proteinseqs(host_cache_dir: Path, image: str) -> None:
     plugin_path = host_cache_dir / "Plugins" / "ProteinSeqs.pm"
     if plugin_path.exists():
         return
+    # run as host user to avoid permission mismatches
+    uid = os.getuid()
+    gid = os.getgid()
+
     cmd = [
         "docker",
         "run",
-        "--rm",
+        "--user",
+        f"{uid}:{gid}",
         "-it",
         "-v",
         f"{str(host_cache_dir)}:/opt/vep/.vep",
@@ -256,9 +261,15 @@ def run_vep_docker(
     out_mount = out_dir
     fasta_in_container = f"/opt/vep/.vep/{fasta_relpath}"
 
+    # run as host user to avoid permission mismatches
+    uid = os.getuid()
+    gid = os.getgid()
+
     cmd = [
         "docker",
         "run",
+        "--user",
+        f"{uid}:{gid}",
         "--rm",
         "-v",
         f"{str(host_cache_dir)}:/opt/vep/.vep",
