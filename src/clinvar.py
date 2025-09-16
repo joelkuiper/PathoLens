@@ -234,6 +234,11 @@ def load_clinvar_variants(path) -> pd.DataFrame:
         ]
     )
 
+    # Safeguard against PositionVCF = -1
+    df = df[df["PositionVCF"] > 0].dropna(
+        subset=["ReferenceAlleleVCF", "AlternateAlleleVCF"]
+    )
+
     # Filter to pathogenic/non-pathogenic, add _y
     df["_y"] = df["ClinicalSignificance"].map(clean_label)
     df = df.dropna(subset=["_y"]).copy()

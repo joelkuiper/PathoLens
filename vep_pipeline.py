@@ -271,6 +271,7 @@ def run_vep_docker(
         "-lc",
         "set -euo pipefail; "
         "vep "
+        f"--format vcf "
         f"--input_file /work/{vcf_path.name} "
         f"--output_file /out/{out_json.name} "
         "--species homo_sapiens --assembly GRCh38 "
@@ -365,12 +366,97 @@ def run_chunk(args) -> pd.DataFrame:
     return joined
 
 
-# ---------------------------
-# Main orchestration
-# ---------------------------
+def run_vep_pipeline(
+    input_path: Path,
+    host_cache_dir: Path,
+    fasta_relpath: str,
+    out_dir: Path,
+    *,
+    image: str = "ensemblorg/ensembl-vep",
+    filter_mode: str = "all",
+    chunk_size: int = 1000,
+    jobs: int = 4,
+    vep_fork: int = 2,
+    limit: int = 0,
+) -> Path:
+    """
+    Run the full VEP workflow in-process.
+    Returns the path to vep_combined.parquet.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load DF (infer by suffix)
+    if input_path.suffix.lower() in {".feather", ".ft"}:
+        df = pd.read_feather(input_path)
+    elif input_path.suffix.lower() in {".parquet", ".pq"}:
+        df = pd.read_parquet(input_path)
+    else:
+        df = (
+            pd.read_csv(input_path)
+            if input_path.suffix.lower().endswith("csv")
+            else pd.read_table(input_path)
+        )
+
+    df["PositionVCF"] = df["PositionVCF"].astype(int)
+    df = df.sort_values(["ChromosomeAccession", "PositionVCF"]).reset_index(drop=True)
+    print("[sort] globally sorted by ChromosomeAccession,PositionVCF")
+
+    # Required columns
+    missing = [c for c in VCF_COLS if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"Missing required columns: {missing}")
+
+    if limit and limit > 0:
+        df = df.iloc[:limit].copy()
+
+    if filter_mode != "all":
+        before = len(df)
+        df = apply_filter_mode(df, filter_mode)
+        print(f"[filter] {filter_mode} kept {len(df):,}/{before:,}")
+
+    ensure_proteinseqs(host_cache_dir, image)
+
+    # Shard
+    chunks: list[pd.DataFrame] = [
+        df.iloc[i : i + chunk_size].copy() for i in range(0, len(df), chunk_size)
+    ]
+    print(
+        f"[plan] chunks: {len(chunks)}  chunk_size: {chunk_size}  jobs: {jobs}  vep_fork: {vep_fork}"
+    )
+
+    work_dir = out_dir / "work"
+    work_dir.mkdir(exist_ok=True, parents=True)
+
+    job_args = []
+    for idx, cdf in enumerate(chunks):
+        need = set(VCF_COLS + ["GeneSymbol", "hgvsc", "hgvsp", "ClinicalSignificance"])
+        cdf = cdf[[col for col in cdf.columns if col in need]].copy()
+        job_args.append(
+            (idx, cdf, work_dir, host_cache_dir, fasta_relpath, image, vep_fork)
+        )
+
+    from multiprocessing.pool import ThreadPool
+
+    with ThreadPool(processes=jobs) as pool:
+        dfs = list(pool.imap_unordered(run_chunk, job_args))
+
+    combined = pd.concat(dfs, ignore_index=True)
+    out_feather = out_dir / "vep_combined.feather"
+    out_parquet = out_dir / "vep_combined.parquet"
+    combined.to_feather(out_feather)
+    combined.to_parquet(out_parquet, index=False)
+    print(f"[done] wrote {out_feather} and {out_parquet}")
+
+    has_wt = combined["seq_wt"].notna().sum() if "seq_wt" in combined else 0
+    has_mt = combined["seq_mt"].notna().sum() if "seq_mt" in combined else 0
+    print(f"[summary] rows: {len(combined):,}  WT seq: {has_wt:,}  MT seq: {has_mt:,}")
+
+    return out_parquet
 
 
 def main():
+    import argparse
+
     ap = argparse.ArgumentParser(
         description="Run VEP-in-Docker on a ClinVar-like DataFrame"
     )
@@ -378,14 +464,10 @@ def main():
         "--input", required=True, help="Path to input DF (feather/parquet/csv)"
     )
     ap.add_argument(
-        "--host_cache_dir",
-        required=True,
-        help="Host path to VEP cache root (mounted to /opt/vep/.vep)",
+        "--host_cache_dir", required=True, help="Host path to VEP cache root"
     )
     ap.add_argument(
-        "--fasta",
-        required=True,
-        help="FASTA path *relative to* host_cache_dir (e.g. homo_sapiens/115_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz)",
+        "--fasta", required=True, help="FASTA path relative to host_cache_dir"
     )
     ap.add_argument("--out_dir", required=True, help="Output directory")
     ap.add_argument(
@@ -395,96 +477,26 @@ def main():
         "--filter",
         default="all",
         choices=["all", "hgvsp_present", "patchable", "protein_changing"],
-        help="Optional filter on HGVSp category before VEP",
+        help="Filter on HGVSp before VEP",
     )
     ap.add_argument("--chunk_size", type=int, default=1000)
     ap.add_argument("--jobs", type=int, default=4, help="Parallel Docker jobs")
-    ap.add_argument(
-        "--vep_fork",
-        type=int,
-        default=2,
-        help="--fork per VEP process (threads inside container)",
-    )
-    ap.add_argument(
-        "--limit", type=int, default=0, help="Process only first N rows (0 = all)"
-    )
+    ap.add_argument("--vep_fork", type=int, default=2, help="--fork inside container")
+    ap.add_argument("--limit", type=int, default=0, help="Process only first N rows")
     args = ap.parse_args()
 
-    in_path = Path(args.input)
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    host_cache_dir = Path(args.host_cache_dir)
-
-    # Load DF (infer by suffix)
-    if in_path.suffix.lower() in {".feather", ".ft"}:
-        df = pd.read_feather(in_path)
-    elif in_path.suffix.lower() in {".parquet", ".pq"}:
-        df = pd.read_parquet(in_path)
-    else:
-        df = (
-            pd.read_csv(in_path)
-            if in_path.suffix.lower().endswith("csv")
-            else pd.read_table(in_path)
-        )
-
-    df["PositionVCF"] = df["PositionVCF"].astype(int)
-    df = df.sort_values(["ChromosomeAccession", "PositionVCF"]).reset_index(drop=True)
-    print("[sort] globally sorted by ChromosomeAccession,PositionVCF")
-
-    # Minimum columns check
-    missing = [c for c in VCF_COLS if c not in df.columns]
-    if missing:
-        raise SystemExit(f"Missing required columns: {missing}")
-
-    if args.limit and args.limit > 0:
-        df = df.iloc[: args.limit].copy()
-
-    if args.filter != "all":
-        before = len(df)
-        df = apply_filter_mode(df, args.filter)
-        print(f"[filter] {args.filter} kept {len(df):,}/{before:,}")
-
-    # Ensure ProteinSeqs exists in plugin dir
-    ensure_proteinseqs(host_cache_dir, args.image)
-
-    # Shard into chunks
-    chunks: List[pd.DataFrame] = [
-        df.iloc[i : i + args.chunk_size].copy()
-        for i in range(0, len(df), args.chunk_size)
-    ]
-    print(
-        f"[plan] chunks: {len(chunks)}  chunk_size: {args.chunk_size}  jobs: {args.jobs}  vep_fork: {args.vep_fork}"
+    run_vep_pipeline(
+        Path(args.input),
+        Path(args.host_cache_dir),
+        args.fasta,
+        Path(args.out_dir),
+        image=args.image,
+        filter_mode=args.filter,
+        chunk_size=args.chunk_size,
+        jobs=args.jobs,
+        vep_fork=args.vep_fork,
+        limit=args.limit,
     )
-
-    # Work directory
-    work_dir = out_dir / "work"
-    work_dir.mkdir(exist_ok=True, parents=True)
-
-    # Prepare arg tuples
-    job_args = []
-    for idx, cdf in enumerate(chunks):
-        # retain only columns we need to write VCF + keep for merge
-        need = set(VCF_COLS + ["GeneSymbol", "hgvsc", "hgvsp", "ClinicalSignificance"])
-        cdf = cdf[[col for col in cdf.columns if col in need]].copy()
-        job_args.append(
-            (idx, cdf, work_dir, host_cache_dir, args.fasta, args.image, args.vep_fork)
-        )
-
-    # Run in parallel (IO-bound docker subprocesses → threads are OK)
-    with ThreadPool(processes=args.jobs) as pool:
-        dfs = list(pool.imap_unordered(run_chunk, job_args))
-
-    # Combine and write
-    combined = pd.concat(dfs, ignore_index=True)
-    out_feather = out_dir / "vep_combined.feather"
-    out_parquet = out_dir / "vep_combined.parquet"
-    combined.to_feather(out_feather)
-    combined.to_parquet(out_parquet, index=False)
-    print(f"[done] wrote {out_feather} and {out_parquet}")
-    # Tiny report
-    has_wt = combined["seq_wt"].notna().sum() if "seq_wt" in combined else 0
-    has_mt = combined["seq_mt"].notna().sum() if "seq_mt" in combined else 0
-    print(f"[summary] rows: {len(combined):,}  WT seq: {has_wt:,}  MT seq: {has_mt:,}")
 
 
 if __name__ == "__main__":
