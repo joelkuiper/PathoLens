@@ -1,4 +1,4 @@
-# src/dna_utils.py (simplified)
+# src/dna_utils.py
 from __future__ import annotations
 from typing import Iterable, Tuple, Optional, List
 

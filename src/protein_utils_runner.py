@@ -1,25 +1,29 @@
 # src/protein_utils_runner.py
 from __future__ import annotations
+
+import os
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict
 import pandas as pd
 
 from vep_pipeline import run_vep_pipeline
-from src.protein_utils import process_and_cache_protein  # keep if we embed here
+from src.protein_utils import (
+    process_and_cache_protein,
+)  # embeds and writes prot meta/npz
 
 
-def _protein_paths(cfg, split: str) -> tuple[str, str]:
-    meta = str(Path(cfg.out_dir) / f"protein_{split}.feather")
-    npz = str(Path(cfg.out_dir) / f"protein_{split}_eff_fp16.npz")
+def _protein_paths(out_dir: Path, split: str) -> tuple[str, str]:
+    meta = str(out_dir / f"protein_{split}.feather")
+    npz = str(out_dir / f"protein_{split}_eff_fp16.npz")
     return meta, npz
 
 
-def _split_input_path(cfg, split: str) -> str:
-    return str(Path(cfg.out_dir) / f"clinvar_{split}.feather")
+def _split_input_path(out_dir: Path, split: str) -> str:
+    return str(out_dir / f"clinvar_{split}.feather")
 
 
-def _vep_out_dir(cfg, split: str) -> Path:
-    return Path(cfg.out_dir) / f"out_vep_{split}"
+def _vep_out_dir(out_dir: Path, split: str) -> Path:
+    return out_dir / f"out_vep_{split}"
 
 
 def _write_split(df: pd.DataFrame, path: str) -> None:
@@ -60,7 +64,7 @@ def _run_vep_pipeline(
 
 
 def build_protein_caches(
-    cfg,
+    out_dir: Path,
     device: str,
     splits: Dict[str, pd.DataFrame],
     *,
@@ -77,26 +81,34 @@ def build_protein_caches(
     max_len: int = 2048,
     pool: str = "mean",
     force_embeddings: bool = False,
-) -> Dict[str, tuple[pd.DataFrame, str]]:
+) -> Dict[str, Dict[str, str]]:
     """
-    For each split:
-      - writes <out_dir>/clinvar_<split>.feather
-      - runs VEP into <out_dir>/out_vep_<split> (cached if already done)
-      - embeds WT/MT and writes:
+    Build (or reuse) protein artifacts for each split and return a manifest:
+      { split: { "meta": <protein_meta_feather>, "npz": <protein_npz> } }
+
+    Pipeline per split:
+      - write <out_dir>/clinvar_<split>.feather
+      - run VEP into <out_dir>/out_vep_<split> (guarded if already done)
+      - embed WT/MT effect vectors and write:
           <out_dir>/protein_<split>.feather
-          <out_dir>/protein_<split>_eff_fp16.npz (contains 'prot_eff')
-    Returns: {split: (kept_meta_df, npz_path)}
+          <out_dir>/protein_<split>_eff_fp16.npz ('prot_eff')
     """
-    out: Dict[str, tuple[pd.DataFrame, str]] = {}
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: Dict[str, Dict[str, str]] = {}
     bs = bs_cuda if device == "cuda" else bs_cpu
 
     for split, df in splits.items():
-        inp = _split_input_path(cfg, split)
+        # Input for VEP
+        inp = _split_input_path(out_dir, split)
         _write_split(df, inp)
 
-        vep_out = _vep_out_dir(cfg, split)
+        # VEP out dir
+        vep_out = _vep_out_dir(out_dir, split)
         vep_out.mkdir(parents=True, exist_ok=True)
 
+        # Run (or reuse) VEP
         combined_parquet = _run_vep_pipeline(
             input_feather=inp,
             host_cache_dir=vep_cache_dir,
@@ -109,8 +121,9 @@ def build_protein_caches(
             vep_fork=vep_fork,
         )
 
-        meta_out, npz_out = _protein_paths(cfg, split)
-        kept, npz_path = process_and_cache_protein(
+        # Embed + save protein effect vectors
+        meta_out, npz_out = _protein_paths(out_dir, split)
+        _kept_df, npz_path = process_and_cache_protein(
             combined_parquet,
             out_meta=meta_out,
             out_npz=npz_out,
@@ -121,6 +134,11 @@ def build_protein_caches(
             pool=pool,
             force_embeddings=force_embeddings,
         )
-        out[split] = (kept, npz_path)
 
-    return out
+        manifest[split] = {"meta": meta_out, "npz": npz_path}
+
+    # Human-readable summary
+    print("[PROTEIN manifest]")
+    for k, v in manifest.items():
+        print(f"  {k}: meta={v['meta']}  npz={v['npz']}")
+    return manifest

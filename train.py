@@ -1,17 +1,18 @@
-# src/train.py (cleaned)
+# train.py
+# src/train.py (cleaned & manifest-driven)
 from __future__ import annotations
-import os
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 
 from src.clinvar import load_clinvar_variants
 from src.dna_utils import load_fasta, process_and_cache_dna
-from src.protein_utils_runner import build_protein_caches
+from src.protein_utils_runner import build_protein_caches  # returns a path manifest
 from src.seq_dataset import SequenceTowerDataset
 from util import get_device
 
@@ -25,6 +26,11 @@ FASTA_PATH: Path = DATA_DIR / "raw" / "GCF_000001405.40_GRCh38.p14_genomic.fna"
 CLINVAR_PATH: Path = DATA_DIR / "raw" / "variant_summary.txt.gz"
 CLINVAR_CACHE_MARKER: Path = OUT_DIR / "_cached_clinvar.ok"
 GO_NPZ: Path = DATA_DIR / "processed" / "go_n2v_genes.npz"
+
+# For manifests: { split: {"meta": <feather>, "npz": <npz>} }
+CacheIndex = Dict[
+    str, Dict[str, str]
+]  # e.g., {"train": {"meta": "...", "npz": "..."}, ...}
 
 
 # ---------------------------------------------------------------------
@@ -150,7 +156,7 @@ class RunCfg:
 
 
 # ---------------------------------------------------------------------
-# DNA caches
+# DNA caches (manifest-producing)
 # ---------------------------------------------------------------------
 
 
@@ -159,65 +165,94 @@ def _bs_by_device(device: str, cpu_bs: int, cuda_bs: int) -> int:
     return cuda_bs if device == "cuda" else max(1, cpu_bs)
 
 
-def _dna_paths(cfg: RunCfg, split: str) -> Tuple[str, str]:
+def _dna_paths(cfg: RunCfg, split: str) -> Tuple[Path, Path]:
     """Return (meta_feather_path, dna_npz_path) for a split."""
     return (
-        str(cfg.out_dir / f"dna_{split}.feather"),
-        str(cfg.out_dir / f"dna_{split}_eff_fp16.npz"),
+        cfg.out_dir / f"dna_{split}.feather",
+        cfg.out_dir / f"dna_{split}_eff_fp16.npz",
     )
 
 
-def build_dna_caches(
-    cfg: RunCfg, device: str, fasta, splits: Dict[str, pd.DataFrame]
-) -> Dict[str, Tuple[pd.DataFrame, str]]:
+def build_dna_caches_manifest(
+    cfg: RunCfg,
+    device: str,
+    fasta,
+    splits: Dict[str, pd.DataFrame],
+) -> CacheIndex:
     """
     Build (or reuse) DNA windows + embeddings for each split.
 
-    Returns: { split: (kept_df, dna_npz_path) }
+    Returns a manifest:
+      { split: { "meta": <feather path>, "npz": <npz path> } }
     """
-    out: Dict[str, Tuple[pd.DataFrame, str]] = {}
+    manifest: CacheIndex = {}
     bs = _bs_by_device(device, cpu_bs=8, cuda_bs=32)
 
-    for name, df in splits.items():
-        meta_out, npz_out = _dna_paths(cfg, name)
-        kept, npz = process_and_cache_dna(
+    for split, df in splits.items():
+        meta_out, npz_out = _dna_paths(cfg, split)
+        kept, npz_path = process_and_cache_dna(
             df,
             fasta,
             window=cfg.dna_window,
             batch_size=bs,
             pool=cfg.dna_pool,
             max_length=cfg.dna_max_len,
-            out_meta=meta_out,
-            out_npz=npz_out,
+            out_meta=str(meta_out),
+            out_npz=str(npz_out),
             device=device,
             limit=None,
         )
-        out[name] = (kept, npz)
+        manifest[split] = {"meta": str(meta_out), "npz": str(npz_path)}
 
-    return out
+    # Human-readable summary
+    print("[DNA manifest]")
+    for k, v in manifest.items():
+        print(f"  {k}: meta={v['meta']}  npz={v['npz']}")
+    return manifest
 
 
 # ---------------------------------------------------------------------
-# Datasets
+# Datasets (manifest-driven)
 # ---------------------------------------------------------------------
 
 
-def build_seq_datasets(cfg: RunCfg) -> Dict[str, SequenceTowerDataset]:
+def build_seq_datasets(
+    dna_manifest: CacheIndex,
+    go_npz_path: Path,
+    protein_manifest: Optional[CacheIndex] = None,
+) -> Dict[str, SequenceTowerDataset]:
     """
-    Create SequenceTowerDataset per split (train/val/test) using DNA + GO.
-    Protein features can be attached later via SequenceTowerDataset if desired.
+    Create SequenceTowerDataset per split (train/val/test) using DNA + GO,
+    and optionally protein features if a protein manifest is provided.
+
+    Args:
+      dna_manifest: {split: {"meta": path, "npz": path}}
+      go_npz_path: path to GO embeddings .npz
+      protein_manifest: optional {split: {"meta": path, "npz": path}}
+
+    Returns:
+      dict: {split: SequenceTowerDataset}
     """
     seq: Dict[str, SequenceTowerDataset] = {}
-    for name in ("train", "val", "test"):
-        dna_meta, dna_npz = _dna_paths(cfg, name)
+    for split, dpaths in dna_manifest.items():
+        pmeta = pnpz = None
+        if protein_manifest is not None and split in protein_manifest:
+            pmeta = protein_manifest[split]["meta"]
+            pnpz = protein_manifest[split]["npz"]
+
         ds = SequenceTowerDataset(
-            meta_feather=dna_meta,
-            dna_npz=dna_npz,
-            go_npz=str(cfg.go_npz),
+            meta_feather=dpaths["meta"],
+            dna_npz=dpaths["npz"],
+            go_npz=str(go_npz_path),
             make_label=True,
             label_col="_y",
+            protein_meta_feather=pmeta,
+            protein_npz=pnpz,
+            protein_eff_key="prot_eff",
         )
-        seq[name] = ds
+        seq[split] = ds
+
+    print("[Datasets] built for splits:", ", ".join(sorted(seq.keys())))
     return seq
 
 
@@ -245,18 +280,18 @@ def main() -> None:
     splits = {"train": train_df, "val": val_df, "test": test_df}
     print(f"Splits: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
 
-    # --- 1) DNA caches ---
+    # --- 1) DNA caches (manifest) ---
     if not cfg.fasta_path.exists():
         raise FileNotFoundError(f"FASTA not found at {cfg.fasta_path}")
     fasta = load_fasta(str(cfg.fasta_path))
-    _ = build_dna_caches(cfg, device, fasta, splits)
+    dna_manifest = build_dna_caches_manifest(cfg, device, fasta, splits)
 
-    # --- 2) Protein caches ---
+    # --- 2) Protein caches (manifest) ---
     # Skips expensive VEP if vep_combined outputs already exist (guard is in runner)
-    _ = build_protein_caches(
-        cfg,
-        device,
-        splits,
+    protein_manifest = build_protein_caches(
+        out_dir=cfg.out_dir,
+        device=device,
+        splits=splits,
         vep_cache_dir=os.path.expanduser("~/vep_cache"),
         vep_fasta_relpath="homo_sapiens/115_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
         image="ensemblorg/ensembl-vep",
@@ -269,18 +304,19 @@ def main() -> None:
         bs_cpu=8,
         max_len=2048,
         pool="mean",
+        force_embeddings=False,
     )
 
-    # --- 3) Datasets ---
-    seq_ds = build_seq_datasets(cfg)
+    # --- 3) Datasets (manifest-driven) ---
+    seq_ds = build_seq_datasets(dna_manifest, cfg.go_npz, protein_manifest)
 
-    # --- 4) LLM (Qwen QLoRA) with conditioning on [DNA ⊕ GO] ---
+    # --- 4) LLM (Qwen QLoRA) with conditioning on [DNA ⊕ GO (⊕ PROT if present)] ---
     from src.llm.train import run_llm_pipeline
     import src.llm.eval as llm_eval
 
     llm_out_dir = str(OUT_DIR / "qwen3_hpo_lora")
 
-    llm_res = run_llm_pipeline(
+    _ = run_llm_pipeline(
         out_dir=llm_out_dir,
         seq_ds=seq_ds,  # {"train","val","test"} SequenceTowerDataset
         model_id="Qwen/Qwen3-4B-Instruct-2507",
