@@ -1,11 +1,23 @@
 # src/seq_dataset.py
 from __future__ import annotations
 from typing import Optional, Tuple, Dict
+import os
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from src.go_n2v_utils import GeneGOEmbeddings
+
+
+def _fmt_path(p: Optional[str], label: str) -> str:
+    if not p:
+        return f"{label}: <none>"
+    try:
+        ab = os.path.abspath(p)
+        ex = os.path.exists(p)
+        return f"{label}: {p}  ({'exists' if ex else 'MISSING'})"
+    except Exception:
+        return f"{label}: {p}"
 
 
 class SequenceTowerDataset(Dataset):
@@ -18,89 +30,185 @@ class SequenceTowerDataset(Dataset):
         eff_key: str = "dna_eff",
         make_label: bool = True,
         label_col: str = "_y",
-        # --- NEW: protein inputs (optional) ---
+        # --- optional protein inputs ---
         protein_meta_feather: Optional[str] = None,
         protein_npz: Optional[str] = None,
         protein_eff_key: str = "prot_eff",
     ):
+        # --------- Report the inputs up front ---------
+        print("\n[SequenceTowerDataset] constructing...")
+        print(_fmt_path(meta_feather, "meta_feather"))
+        print(_fmt_path(dna_npz, "dna_npz"))
+        print(_fmt_path(go_npz, "go_npz"))
+        if protein_meta_feather or protein_npz:
+            print(_fmt_path(protein_meta_feather, "protein_meta_feather"))
+            print(_fmt_path(protein_npz, "protein_npz"))
+
         # ---- main meta (DNA-aligned) ----
         self.meta = pd.read_feather(meta_feather)
         if "emb_row" not in self.meta.columns:
             raise ValueError("meta feather must contain 'emb_row'")
         self.emb_rows = self.meta["emb_row"].to_numpy(dtype=np.int64)
 
+        # Basic meta debug
+        n_rows = len(self.meta)
+        ex_cols = [
+            c for c in ("VariationID", "GeneSymbol", "_y") if c in self.meta.columns
+        ]
+        print(f"[meta] rows={n_rows}  cols={len(self.meta.columns)}  has={ex_cols}")
+        if "VariationID" in self.meta.columns:
+            # show a tiny peek of IDs to verify types/shape
+            sample_ids = self.meta["VariationID"].astype(str).head(3).tolist() + (
+                ["..."] if n_rows > 3 else []
+            )
+            print(f"[meta] VariationID sample: {sample_ids}")
+        if "GeneSymbol" in self.meta.columns:
+            sample_genes = self.meta["GeneSymbol"].astype(str).head(3).tolist() + (
+                ["..."] if n_rows > 3 else []
+            )
+            print(f"[meta] GeneSymbol sample: {sample_genes}")
+
         # ---- DNA arrays (memmap) ----
-        self._npz = np.load(dna_npz, mmap_mode="r")
+        try:
+            self._npz = np.load(dna_npz, mmap_mode="r")
+        except Exception as e:
+            raise RuntimeError(f"Failed to open dna_npz '{dna_npz}': {e}") from e
+
         if eff_key not in self._npz.files:
-            raise KeyError(f"'{eff_key}' not in {dna_npz}. Keys: {self._npz.files}")
+            raise KeyError(
+                f"'{eff_key}' not in {dna_npz}. Keys: {list(self._npz.files)}"
+            )
         self.dna_eff = self._npz[eff_key]  # (N_full, D_eff)
-        N_full = self.dna_eff.shape[0]
-        if int(self.emb_rows.max()) >= N_full or int(self.emb_rows.min()) < 0:
-            raise RuntimeError(f"emb_row indices out of range [0,{N_full})")
+
+        N_full = int(self.dna_eff.shape[0])
+        D_eff = int(self.dna_eff.shape[1]) if self.dna_eff.ndim == 2 else None
+        print(
+            f"[DNA] key='{eff_key}'  shape={tuple(self.dna_eff.shape)}  dtype={self.dna_eff.dtype}"
+        )
+        if self.dna_eff.ndim != 2:
+            raise RuntimeError(f"dna_eff expected 2D array, got {self.dna_eff.ndim}D")
+        # emb_row range check
+        if (
+            int(self.emb_rows.max(initial=-1)) >= N_full
+            or int(self.emb_rows.min(initial=0)) < 0
+        ):
+            raise RuntimeError(
+                f"emb_row indices out of range [0, {N_full}) "
+                f"(min={self.emb_rows.min()}, max={self.emb_rows.max()})"
+            )
 
         # ---- GO embeddings ----
-        self.go = GeneGOEmbeddings(go_npz, normalize=True, uppercase_keys=True)
+        try:
+            self.go = GeneGOEmbeddings(go_npz, normalize=True, uppercase_keys=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load GO embeddings from '{go_npz}': {e}"
+            ) from e
 
-        self.D_eff = int(self.dna_eff.shape[1])
+        self.D_eff = D_eff
         self.D_go = int(self.go.dim)
+        print(
+            f"[GO] dim={self.D_go}  entries={len(self.go.name2idx) if hasattr(self.go, 'name2idx') else 'unknown'}"
+        )
 
         # ---- labels ----
         self.make_label = make_label
         self.label_col = label_col
+        if self.make_label and self.label_col not in self.meta.columns:
+            raise KeyError(f"Label column '{self.label_col}' not found in meta.")
 
         # quick GO hit-rate
-        genes = self.meta["GeneSymbol"].astype(str).str.upper().tolist()
-        self.go_hits = sum(g in self.go.name2idx for g in genes) / max(1, len(genes))
+        genes_series = self.meta.get("GeneSymbol", pd.Series([""] * n_rows))
+        genes = genes_series.astype(str).str.upper().tolist()
+        self.go_hits = sum(g in getattr(self.go, "name2idx", {}) for g in genes) / max(
+            1, len(genes)
+        )
         print(
             f"[GO] hit-rate: {self.go_hits:.3f} "
             f"(found {int(self.go_hits * len(genes))}/{len(genes)})"
         )
 
-        # ---- OPTIONAL: protein embeddings ----
         self.prot_eff = None
         self.D_prot = 0
         self._prot_rows = None  # per-sample index into protein array, -1 if missing
 
         if protein_meta_feather is not None and protein_npz is not None:
-            pmeta = pd.read_feather(protein_meta_feather)
-            # normalize id types
+            # Load protein meta
+            try:
+                pmeta = pd.read_feather(protein_meta_feather)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to read protein meta '{protein_meta_feather}': {e}"
+                ) from e
+
             if "id" not in pmeta.columns:
                 raise ValueError(
                     "protein meta feather must contain 'id' (VariationID as str)"
                 )
-            pmeta = pmeta.copy()
-            pmeta["id"] = pmeta["id"].astype(str)
-            if "VariationID" in self.meta.columns:
-                ids = self.meta["VariationID"].astype(str)
-            else:
-                # fallback: if your meta also uses 'id'
-                ids = self.meta["id"].astype(str)
-
-            # map id -> protein emb_row
             if "emb_row" not in pmeta.columns:
                 raise ValueError("protein meta feather must contain 'emb_row'")
-            id2prow = dict(zip(pmeta["id"], pmeta["emb_row"]))
+
+            pmeta = pmeta.copy()
+            pmeta["id"] = pmeta["id"].astype(str)
+
+            # Choose DNA ids source
+            if "VariationID" in self.meta.columns:
+                ids = self.meta["VariationID"].astype(str)
+                id_source = "meta[VariationID]"
+            else:
+                ids = self.meta["id"].astype(str)
+                id_source = "meta[id]"
+            print(f"[PROT] aligning by {id_source} ↔ protein_meta[id]")
+
+            # Build id -> protein emb_row map
+            id2prow = dict(zip(pmeta["id"].astype(str), pmeta["emb_row"].astype(int)))
             prow = np.full(len(self.meta), -1, dtype=np.int64)
+            miss_example: list[str] = []
             for i, vid in enumerate(ids):
                 r = id2prow.get(vid, -1)
                 prow[i] = r
+                if r < 0 and len(miss_example) < 3:
+                    miss_example.append(vid)
             self._prot_rows = prow
 
             # load protein arrays (memmap)
-            pz = np.load(protein_npz, mmap_mode="r")
+            try:
+                pz = np.load(protein_npz, mmap_mode="r")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to open protein_npz '{protein_npz}': {e}"
+                ) from e
+
             if protein_eff_key not in pz.files:
                 raise KeyError(
-                    f"'{protein_eff_key}' not in {protein_npz}. Keys: {pz.files}"
+                    f"'{protein_eff_key}' not in {protein_npz}. Keys: {list(pz.files)}"
                 )
             self.prot_eff = pz[protein_eff_key]
+            if self.prot_eff.ndim != 2:
+                raise RuntimeError(
+                    f"protein eff expected 2D array, got {self.prot_eff.ndim}D"
+                )
             self.D_prot = int(self.prot_eff.shape[1])
 
-            # coverage stat
             cov = int((self._prot_rows >= 0).sum())
+            cov_pct = 100.0 * cov / max(1, len(self.meta))
             print(
-                f"[PROT] coverage: {cov}/{len(self.meta)} "
-                f"({100.0 * cov / len(self.meta):.1f}%)  D_prot={self.D_prot}"
+                f"[PROT] coverage: {cov}/{len(self.meta)} ({cov_pct:.1f}%)  "
+                f"shape={tuple(self.prot_eff.shape)} dtype={self.prot_eff.dtype}"
             )
+            if cov < len(self.meta):
+                print(f"[PROT] first missing ids (up to 3): {miss_example or '—'}")
+
+        else:
+            print("[PROT] not provided (skipping protein features)")
+            self.D_prot = 0
+
+        # Final layout summary
+        total_D = self.D_eff + self.D_go + (self.D_prot or 0)
+        print(
+            f"[SequenceTowerDataset] feature layout: "
+            f"dna={self.D_eff}  go={self.D_go}  prot={self.D_prot}  total={total_D}\n"
+        )
 
     def __len__(self) -> int:
         return len(self.meta)
@@ -112,12 +220,19 @@ class SequenceTowerDataset(Dataset):
         r = int(self.emb_rows[idx])
         gene = str(row.get("GeneSymbol", ""))
 
+        # DNA eff (always present)
         eff_np = np.asarray(self.dna_eff[r], dtype="float32", order="C")  # (D_eff,)
-        go_np = self.go.get(gene)  # (D_go,)
+
+        # GO vec (fallback to zeros if missing)
+        go_vec = self.go.get(gene)
+        if go_vec is None:
+            go_np = np.zeros((self.D_go,), dtype="float32")
+        else:
+            go_np = np.asarray(go_vec, dtype="float32", order="C")
 
         parts = [eff_np, go_np]
 
-        # protein eff
+        # Protein eff (zeros if not aligned)
         if self.prot_eff is not None and self._prot_rows is not None:
             pr = int(self._prot_rows[idx])
             if pr >= 0:
@@ -131,18 +246,24 @@ class SequenceTowerDataset(Dataset):
 
         y = None
         if self.make_label:
-            y = torch.tensor(int(row[self.label_col]), dtype=torch.long)
+            try:
+                y = torch.tensor(int(row[self.label_col]), dtype=torch.long)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to read label '{self.label_col}' at idx={idx}: {e}"
+                ) from e
+
+        # keep varid numeric if possible, else -1
+        varid = -1
+        if "VariationID" in row.index:
+            try:
+                varid = int(row["VariationID"])
+            except Exception:
+                varid = -1
 
         aux = {
             "gene": gene,
-            "varid": int(row.get("VariationID", -1)) if "VariationID" in row else -1,
+            "varid": varid,
             "row": r,
         }
         return x, y, aux
-
-
-def collate_seq(batch):
-    xs, ys, aux = zip(*batch)
-    X = torch.stack(xs, dim=0)
-    y = None if ys[0] is None else torch.stack(ys, dim=0)
-    return X, y, list(aux)
