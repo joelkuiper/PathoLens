@@ -123,27 +123,6 @@ class LLMRunConfig:
     n_cond_tokens: int = 8
     prompt_dropout_prob: float = 0.3
 
-    def to_run_kwargs(self) -> Dict[str, Any]:
-        return {
-            "out_dir": str(self.out_dir),
-            "model_id": self.model_id,
-            "epochs": self.epochs,
-            "max_len": self.max_len,
-            "per_device_bs": self.per_device_bs,
-            "grad_accum": self.grad_accum,
-            "lr": self.lr,
-            "seed": self.seed,
-            "num_workers": self.num_workers,
-            "prefetch_factor": self.prefetch_factor,
-            "persistent_workers": self.persistent_workers,
-            "pin_memory": self.pin_memory,
-            "group_by_length": self.group_by_length,
-            "drop_last": self.drop_last,
-            "balanced_sampling": self.balanced_sampling,
-            "n_cond_tokens": self.n_cond_tokens,
-            "prompt_dropout_prob": self.prompt_dropout_prob,
-        }
-
 
 @dataclass
 class RunConfig:

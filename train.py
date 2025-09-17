@@ -87,11 +87,11 @@ def main() -> None:
     from src.llm.train import run_llm_pipeline
     import src.llm.eval as llm_eval
 
-    llm_kwargs = cfg.llm.to_run_kwargs()
-    out_dir = llm_kwargs.pop("out_dir")
+    llm_cfg = cfg.llm
+    out_dir = llm_cfg.out_dir
     print(f"[llm] output dir: {out_dir}")
-    run_llm_pipeline(out_dir, seq_datasets, **llm_kwargs)
-    llm_eval.run_all(seq_datasets, out_dir=out_dir)
+    run_llm_pipeline(llm_cfg, seq_datasets)
+    llm_eval.run_all(seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id)
     print("[done] training complete")
 
 

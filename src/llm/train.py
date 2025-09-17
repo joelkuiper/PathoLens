@@ -1,13 +1,15 @@
 # src/llm/train.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import os
-import time
+
 import json
+import time
+from pathlib import Path
+from typing import Any, Dict
+
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Dict, Any
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import (
     Trainer,
@@ -16,7 +18,8 @@ from transformers import (
     TrainerState,
     TrainerControl,
 )
-from .config import LLMConfig, set_all_seeds
+
+from .config import LLMRunConfig, set_all_seeds
 from .modeling import build_qwen_with_lora
 from .data import CondTextDataset, make_collator
 
@@ -209,7 +212,7 @@ def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
     )
 
 
-def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMConfig):
+def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMRunConfig):
     print("\n========== SMOKE CHECKS ==========")
     total_train, total_val = len(seq_ds_dict["train"]), len(seq_ds_dict["val"])
     print(f"[SMOKE] Train size: {total_train}  |  Val size: {total_val}")
@@ -243,46 +246,10 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMConfig):
     print("[SMOKE] Chat full   (trunc 200):", fu[0][:200].replace("\n", "\\n"), "...")
 
 
-def run_llm_pipeline(
-    out_dir: str,
-    seq_ds: Dict[str, object],
-    *,
-    model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
-    epochs: int = 1,
-    max_len: int = 256,
-    per_device_bs: int = 16,
-    grad_accum: int = 8,
-    lr: float = 3e-4,
-    seed: int = 42,
-    num_workers: int = 0,
-    prefetch_factor: int = 2,
-    persistent_workers: bool = False,
-    pin_memory: bool = True,
-    group_by_length: bool = False,
-    drop_last: bool = True,
-    balanced_sampling: bool = True,
-    n_cond_tokens: int = 8,  # default k=8
-    prompt_dropout_prob: float = 0.3,  # drop prompt this fraction of the time
-) -> Dict[str, Any]:
-    os.makedirs(out_dir, exist_ok=True)
-    set_all_seeds(seed)
-    cfg = LLMConfig(
-        model_id=model_id,
-        out_dir=out_dir,
-        max_len=max_len,
-        lr=lr,
-        epochs=epochs,
-        grad_accum=grad_accum,
-        per_device_bs=per_device_bs,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
-        pin_memory=pin_memory,
-        group_by_length=group_by_length,
-        drop_last=drop_last,
-        seed=seed,
-    )
-    setattr(cfg, "n_cond_tokens", n_cond_tokens)
+def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, Any]:
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    set_all_seeds(cfg.seed)
 
     # Compute *true* conditioning dim from dataset (includes protein if present)
     D_eff = int(seq_ds["train"].D_eff)
@@ -295,7 +262,7 @@ def run_llm_pipeline(
     tok, base_model, projector = build_qwen_with_lora(cfg, D_cond)
 
     # attach prompt dropout knob
-    base_model.prompt_dropout_prob = float(prompt_dropout_prob)
+    base_model.prompt_dropout_prob = float(cfg.prompt_dropout_prob)
     base_model.config.use_cache = False
 
     print("[DEBUG] Building CondTextDataset(train/val) ...")
@@ -310,10 +277,10 @@ def run_llm_pipeline(
     collator = make_collator(tok, max_len=cfg.max_len)
     smoke_checks(seq_ds, tok, cfg)
 
-    sampler = _make_balanced_sampler(train_ds) if balanced_sampling else None
+    sampler = _make_balanced_sampler(train_ds) if cfg.balanced_sampling else None
 
     args = TrainingArguments(
-        output_dir=cfg.out_dir,
+        output_dir=str(out_dir),
         per_device_train_batch_size=cfg.per_device_bs,
         per_device_eval_batch_size=cfg.per_device_bs,
         gradient_accumulation_steps=cfg.grad_accum,
@@ -334,15 +301,17 @@ def run_llm_pipeline(
         gradient_checkpointing=False,
         report_to="none",
         remove_unused_columns=False,
-        dataloader_num_workers=num_workers,
-        dataloader_pin_memory=pin_memory,
-        dataloader_prefetch_factor=None,
-        dataloader_persistent_workers=False,
-        group_by_length=group_by_length,
+        dataloader_num_workers=cfg.num_workers,
+        dataloader_pin_memory=cfg.pin_memory,
+        dataloader_prefetch_factor=(
+            cfg.prefetch_factor if cfg.num_workers > 0 else None
+        ),
+        dataloader_persistent_workers=cfg.persistent_workers,
+        group_by_length=cfg.group_by_length,
         optim="paged_adamw_8bit",
         tf32=True,
-        seed=seed,
-        data_seed=seed,
+        seed=cfg.seed,
+        data_seed=cfg.seed,
     )
 
     trainer = CondTrainer(
@@ -371,8 +340,8 @@ def run_llm_pipeline(
 
     trainer.train()
 
-    base_model.save_pretrained(os.path.join(out_dir, "adapter"))
-    torch.save(projector.state_dict(), os.path.join(out_dir, "projector.pt"))
+    base_model.save_pretrained(str(out_dir / "adapter"))
+    torch.save(projector.state_dict(), out_dir / "projector.pt")
     print("[INFO] Saved adapter + projector.")
 
     # Quick eval using label scoring
@@ -391,4 +360,4 @@ def run_llm_pipeline(
             indent=2,
         ),
     )
-    return {"eval": eval_res, "out_dir": out_dir}
+    return {"eval": eval_res, "out_dir": str(out_dir)}
