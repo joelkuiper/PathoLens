@@ -1,3 +1,4 @@
+# src/llm/eval.py
 # -*- coding: utf-8 -*-
 # Batched evaluation (compat with eval_old prompt path) + AUC + feather + optional label→rationale.
 # Notes:
@@ -162,7 +163,10 @@ def _batched_label_logprobs(
     logprobs = torch.log_softmax(label_logits, dim=-1)  # [B,L,V]
     ids_batch = ids.expand(inputs_embeds.size(0), -1)  # [B,L]
     token_lp = logprobs.gather(-1, ids_batch.unsqueeze(-1)).squeeze(-1)  # [B,L]
-    return token_lp.sum(dim=1).detach().float().cpu().numpy()  # [B]
+    s = token_lp.sum(dim=1).detach().float().cpu().numpy()  # [B]
+    # guard against any weird values
+    s = np.where(np.isfinite(s), s, -1e9).astype(np.float32)
+    return s
 
 
 # -----------------------
@@ -311,7 +315,13 @@ def evaluate_split_batched(
 
     adapter_dir = os.path.join(out_dir, "adapter")
     projector_path = os.path.join(out_dir, "projector.pt")
-    D_cond = seq_ds["train"].D_eff + seq_ds["train"].D_go
+
+    # --- FIX: correct D_cond to include protein if present ---
+    D_eff = int(seq_ds["train"].D_eff)
+    D_go = int(seq_ds["train"].D_go)
+    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
+    D_cond = D_eff + D_go + D_prot
+    print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})")
 
     tok, model = load_finetuned_model(model_id, D_cond, adapter_dir, projector_path)
     enable_fast_generate(model, tok)
@@ -354,7 +364,7 @@ def evaluate_split_batched(
         # Build prompts/conds WITHOUT ground-truth
         prompts, conds, y_batch = [], [], []
         for i in batch_idxs:
-            x, _, _ = ds[i]
+            x, *_ = ds[i]
             conds.append(x.numpy())
             ctx = build_ctx_from_row(ds.meta.iloc[i])
             prompts.append(PROMPT_TMPL.format(ctx=ctx))
@@ -370,6 +380,7 @@ def evaluate_split_batched(
         for ids in cand["Pathogenic"]:
             lp_p_list.append(_batched_label_logprobs(model, tok, inp_emb, attn, ids))
 
+        # Max over whitespace/no-whitespace variants
         lp_b = (
             np.max(np.vstack(lp_b_list), axis=0)
             if lp_b_list
@@ -381,15 +392,19 @@ def evaluate_split_batched(
             else np.full((len(batch_idxs),), -1e9, dtype=np.float32)
         )
 
+        # Two-class normalization → calibrated probability for Pathogenic
         denom = np.logaddexp(lp_b, lp_p)
         prob_b = np.exp(lp_b - denom)
         prob_p = np.exp(lp_p - denom)
+
         yhat_batch = (lp_p > lp_b).astype(np.int32)
 
         y_true.extend(y_batch)
         y_pred.extend(yhat_batch.tolist())
-        prob_pathogenic.extend(prob_p.tolist())
+        # clamp to valid [0,1] just in case
+        prob_pathogenic.extend(np.clip(prob_p, 0.0, 1.0).tolist())
 
+        # log a few examples
         if len(examples) < 10:
             for j in range(min(len(batch_idxs), 10 - len(examples))):
                 examples.append(
@@ -405,19 +420,23 @@ def evaluate_split_batched(
                 )
 
     # Metrics
-    acc = accuracy_score(y_true, y_pred)
-    p, r, f1, _ = precision_recall_fscore_support(
-        y_true, y_pred, average="binary", zero_division=0
-    )
+    from math import isnan, isfinite
+
+    acc = float(np.mean(np.array(y_pred) == np.array(y_true))) if y_true else 0.0
+    p, r, f1, _ = torchmetrics_safe_prf(y_true, y_pred)
+
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
     report = classification_report(
         y_true, y_pred, labels=[0, 1], target_names=BIN_LABELS, digits=3
     )
     try:
         auc_roc = float(roc_auc_score(y_true, prob_pathogenic))
+    except Exception:
+        auc_roc = float("nan")
+    try:
         auc_pr = float(average_precision_score(y_true, prob_pathogenic))
     except Exception:
-        auc_roc, auc_pr = float("nan"), float("nan")
+        auc_pr = float("nan")
 
     # Save predictions alongside the original meta
     try:
@@ -453,7 +472,7 @@ def evaluate_split_batched(
         pool = rng.choice(idxs, size=min(sample_rationales, len(idxs)), replace=False)
         rats = []
         for i in pool:
-            x, _, _ = ds[i]
+            x, *_ = ds[i]
             cond_vec = x.numpy()
             row = ds.meta.iloc[i]
             ctx = build_ctx_from_row(row)
@@ -496,6 +515,16 @@ def evaluate_split_batched(
         out["rationales"] = rats
 
     return out
+
+
+def torchmetrics_safe_prf(y_true, y_pred):
+    """Helper: precision/recall/F1 with zero_division=0 and floats."""
+    from sklearn.metrics import precision_recall_fscore_support
+
+    p, r, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="binary", zero_division=0
+    )
+    return float(p), float(r), float(f1)
 
 
 # -----------------------
