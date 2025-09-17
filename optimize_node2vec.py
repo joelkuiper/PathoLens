@@ -1,19 +1,14 @@
+# fast_go_optimize.py
+# -*- coding: utf-8 -*-
 import os
-import sys
-import json
-import gc
-import time
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
 from tqdm import tqdm
-from sklearn.ensemble import HistGradientBoostingClassifier as HGB
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    roc_auc_score,
-    average_precision_score,
-)
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import roc_auc_score, average_precision_score
 
 from go_node2vec import (
     load_go_term_edges,
@@ -27,43 +22,27 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 # -------------------------
-# Memory debug helpers
+# Minimal memory logs (safe if no CUDA)
 # -------------------------
 def _cuda_mem_snapshot(tag: str):
-    """Print a small CUDA memory snapshot (safe if no CUDA)."""
     try:
         import torch
 
         if not torch.cuda.is_available():
-            print(f"[mem] {tag}: cuda not available")
             return
-        device = torch.device("cuda:0")
-        free, total = torch.cuda.mem_get_info(device)
-        alloc = torch.cuda.memory_allocated(device)
-        resv = torch.cuda.memory_reserved(device)
-        peak = torch.cuda.max_memory_allocated(device)
+        free, total = torch.cuda.mem_get_info()
+        alloc = torch.cuda.memory_allocated()
+        resv = torch.cuda.memory_reserved()
         print(
-            f"[mem] {tag}: "
-            f"alloc={alloc/2**20:.1f}MiB  reserved={resv/2**20:.1f}MiB  "
-            f"peak={peak/2**20:.1f}MiB  free={free/2**20:.1f}MiB / total={total/2**20:.1f}MiB"
+            f"[mem] {tag}: alloc={alloc/2**20:.0f}MiB resv={resv/2**20:.0f}MiB "
+            f"free={free/2**20:.0f}MiB/{total/2**20:.0f}MiB"
         )
-    except Exception as e:
-        print(f"[mem] {tag}: <err {e}>")
-
-
-def _host_rss_snapshot(tag: str):
-    """Print process RSS (host) if psutil is present."""
-    try:
-        import psutil
-
-        rss = psutil.Process(os.getpid()).memory_info().rss
-        print(f"[rss] {tag}: rss={rss/2**20:.1f}MiB")
     except Exception:
         pass
 
 
 # -------------------------
-# Feature & scoring helpers
+# Feature helpers (for downstream probe)
 # -------------------------
 def _pick_gene(row) -> Optional[str]:
     g = row.get("GeneSymbol") or row.get("GeneSymbolSimple") or row.get("Gene") or ""
@@ -76,7 +55,6 @@ def _split_dims(seq_ds) -> Tuple[int, int]:
 
 
 def _preextract_split(split, D_eff: int, *, max_n: Optional[int] = None):
-    """One-time extraction: DNA array (N, D_eff), gene list (N,), labels (N,)."""
     n = len(split)
     idxs = np.arange(n)
     if max_n is not None and max_n < n:
@@ -101,7 +79,6 @@ def _preextract_split(split, D_eff: int, *, max_n: Optional[int] = None):
 def _assemble_go_matrix(
     genes: np.ndarray, gene2vec: Dict[str, np.ndarray], dim: int
 ) -> np.ndarray:
-    """Vectorized gather: unknown genes → zeros."""
     out = np.zeros((len(genes), dim), dtype=np.float32)
     for i, g in enumerate(genes):
         vec = gene2vec.get(g)
@@ -110,134 +87,78 @@ def _assemble_go_matrix(
     return out
 
 
-def _fit_eval_hgb(Xtr, ytr, Xte, yte) -> Dict[str, float]:
-    clf = HGB(
+# -------------------------
+# Downstream probe (fast, SGD)
+# -------------------------
+def _fit_eval_sgd(Xtr, ytr, Xte, yte) -> Dict[str, float]:
+    scaler = StandardScaler(with_mean=True, with_std=True)
+    Xtr_s = scaler.fit_transform(Xtr)
+    Xte_s = scaler.transform(Xte)
+
+    clf = SGDClassifier(
         loss="log_loss",
-        max_depth=None,
-        max_iter=300,
-        learning_rate=0.1,
+        penalty="l2",
+        alpha=1e-4,
+        max_iter=1000,
+        tol=1e-3,
         early_stopping=True,
         validation_fraction=0.1,
-        l2_regularization=1e-4,
-        max_bins=255,
+        n_iter_no_change=5,
         random_state=0,
+        n_jobs=-1,
     )
-    clf.fit(Xtr, ytr)
-    p = clf.predict_proba(Xte)[:, 1]
-    yh = (p >= 0.5).astype(int)
+    clf.fit(Xtr_s, ytr)
+    p = clf.predict_proba(Xte_s)[:, 1]
     return dict(
-        acc=float(accuracy_score(yte, yh)),
-        f1=float(f1_score(yte, yh)),
         roc=float(roc_auc_score(yte, p)),
         pr=float(average_precision_score(yte, p)),
     )
 
 
 # -------------------------
-# Intrinsic GO metric
+# Hold-out splitter (G–T edges per gene)
 # -------------------------
-def _link_pred_score(
-    edge_index,
-    emb,
-    nodes,
-    num_neg=10000,
-    seed=0,
-    mode: str = "hard",  # "easy", "gt", or "hard"
-) -> Dict[str, float]:
-    """
-    Intrinsic link prediction with selectable difficulty.
+def _split_gene_term_edges_for_eval(
+    edge_index, nodes, eval_frac: float = 0.10, seed: int = 0
+):
+    import torch
 
-    mode:
-      - "easy":   all edges (G–T, T–T, G–G) vs random pairs (original, saturates at ~0.99 ROC).
-      - "gt":     only gene–term edges vs random gene–term non-edges (harder).
-      - "hard":   only gene–term edges vs degree-matched gene–term non-edges (hardest).
-    """
     rng = np.random.default_rng(seed)
-    edges = edge_index.t().cpu().numpy()
-    n_nodes = emb.shape[0]
+    ei = edge_index.t().cpu().numpy()
+    id2name = dict(enumerate(nodes))
 
-    # Partition nodes
-    gene_idx = [i for i, n in enumerate(nodes) if n.startswith("G::")]
-    term_idx = [i for i, n in enumerate(nodes) if n.startswith("T::")]
-    gene_idx = np.array(gene_idx, dtype=np.int64)
-    term_idx = np.array(term_idx, dtype=np.int64)
+    gt_idxs = []
+    for i, (u, v) in enumerate(ei):
+        nu, nv = id2name[u], id2name[v]
+        if (nu.startswith("G::") and nv.startswith("T::")) or (
+            nv.startswith("G::") and nu.startswith("T::")
+        ):
+            gt_idxs.append(i)
+    gt_idxs = np.array(gt_idxs, dtype=np.int64)
 
-    if mode == "easy":
-        # all edges vs random pairs
-        n_test = max(1, edges.shape[0] // 10)
-        idxs = rng.choice(edges.shape[0], size=n_test, replace=False)
-        pos_edges = edges[idxs]
-        neg_edges = rng.integers(0, n_nodes, size=(num_neg, 2))
+    by_gene: Dict[int, List[int]] = {}
+    for i in gt_idxs:
+        u, v = ei[i]
+        g = u if id2name[u].startswith("G::") else v
+        by_gene.setdefault(g, []).append(i)
 
-    else:
-        # restrict to gene–term edges
-        mask = [
-            (nodes[u].startswith("G::") and nodes[v].startswith("T::"))
-            or (nodes[v].startswith("G::") and nodes[u].startswith("T::"))
-            for u, v in edges
-        ]
-        gt_edges = edges[np.array(mask)]
+    keep_mask = np.ones(len(ei), dtype=bool)
+    eval_take = []
+    for g, idxs in by_gene.items():
+        idxs = np.array(idxs, dtype=np.int64)
+        k = max(1, int(round(len(idxs) * eval_frac)))
+        sel = rng.choice(idxs, size=k, replace=False)
+        eval_take.append(sel)
+    eval_take = np.concatenate(eval_take) if eval_take else np.array([], dtype=np.int64)
+    keep_mask[eval_take] = False
 
-        # hold out 10% positives
-        n_test = max(1, len(gt_edges) // 10)
-        idxs = rng.choice(len(gt_edges), size=n_test, replace=False)
-        pos_edges = gt_edges[idxs]
-
-        # negatives
-        edge_set = {tuple(sorted(e)) for e in map(tuple, gt_edges)}
-
-        if mode == "gt":
-            # uniform gene–term non-edges
-            neg_edges = []
-            while len(neg_edges) < num_neg:
-                g = rng.choice(gene_idx)
-                t = rng.choice(term_idx)
-                e = tuple(sorted((g, t)))
-                if e not in edge_set:
-                    neg_edges.append((g, t))
-            neg_edges = np.array(neg_edges, dtype=np.int64)
-
-        elif mode == "hard":
-            # degree-matched negatives
-            deg = {}
-            for g, t in gt_edges:
-                g, t = (g, t) if nodes[g].startswith("G::") else (t, g)
-                deg[t] = deg.get(t, 0) + 1
-            neg_edges = []
-            for g, t in pos_edges:
-                g, t = (g, t) if nodes[g].startswith("G::") else (t, g)
-                t_deg = deg.get(t, 1)
-                cand_terms = [tt for tt in term_idx if abs(deg.get(tt, 1) - t_deg) <= 2]
-                if not cand_terms:
-                    cand_terms = term_idx
-                tries = 0
-                while True:
-                    t2 = rng.choice(cand_terms)
-                    e = tuple(sorted((g, t2)))
-                    if e not in edge_set:
-                        neg_edges.append((g, t2))
-                        break
-                    tries += 1
-                    if tries > 10:
-                        break
-            neg_edges = np.array(neg_edges, dtype=np.int64)
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-    # score edges
-    pos_scores = np.sum(emb[pos_edges[:, 0]] * emb[pos_edges[:, 1]], axis=1)
-    neg_scores = np.sum(emb[neg_edges[:, 0]] * emb[neg_edges[:, 1]], axis=1)
-
-    y = np.concatenate([np.ones_like(pos_scores), np.zeros_like(neg_scores)])
-    s = np.concatenate([pos_scores, neg_scores])
-    return dict(
-        roc=float(roc_auc_score(y, s)),
-        pr=float(average_precision_score(y, s)),
-    )
+    train_ei = torch.from_numpy(ei[keep_mask]).t().contiguous()
+    eval_ei = torch.from_numpy(ei[eval_take]).t().contiguous()
+    return train_ei, eval_ei
 
 
 # -------------------------
-# Graph cache (CPU-only; does NOT touch CUDA)
+# Graph cache (CPU-only)
 # -------------------------
 class GraphCache:
     def __init__(self, go_json: str, gaf: str):
@@ -263,7 +184,6 @@ class GraphCache:
                 self.gaf,
                 evidence_whitelist=ev_wl,
                 exclude_not=True,
-                # Exclude Cellular Component, keep BP + MF
                 aspect_whitelist={"P", "F"},
             )
             self._curated_only = curated_only
@@ -287,7 +207,7 @@ class GraphCache:
             drop_roots=drop_roots,
             prune_term_degree=prune_term_degree,
         )
-        edge_index, nodes = graph_to_edge_index(G)  # CPU tensor + python list
+        edge_index, nodes = graph_to_edge_index(G)
         self.cache[key] = (edge_index, nodes)
         return edge_index, nodes
 
@@ -305,18 +225,16 @@ def optimize_go_for_seqds(
     refit_epochs: int = 12,
     seed: int = 0,
     use_optuna: Optional[bool] = None,
+    objective_metric: str = "delta_roc",  # "delta_roc" or "delta_pr"
     max_train_probe: Optional[int] = 80000,
     max_val_probe: Optional[int] = 20000,
 ) -> Dict[str, Any]:
+    import torch, random
+
     rng = np.random.default_rng(seed)
-    try:
-        import torch
-
+    if torch.cuda.is_available():
         torch.manual_seed(seed)
-    except Exception:
-        pass
 
-    # Pre-extract once (CPU)
     D_eff, _ = _split_dims(seq_ds)
     tr_dna, tr_genes, tr_y = _preextract_split(
         seq_ds["train"], D_eff, max_n=max_train_probe
@@ -328,12 +246,12 @@ def optimize_go_for_seqds(
     graph_cache = GraphCache(go_json, gaf)
 
     search_space = dict(
-        dim=[128],
+        dim=[128, 256, 384],
         epochs=[8],
         batch_size=[256, 384],
-        walk_len=[30, 40],
-        ctx_size=[6, 8],
-        walks_per_node=[12, 16],
+        walk_len=[20, 30, 40],
+        ctx_size=[4, 6, 8],
+        walks_per_node=[8, 12, 16],
         neg_samples=[2, 5],
         curated_only=[True],
         no_term_edges=[False],
@@ -344,7 +262,7 @@ def optimize_go_for_seqds(
 
     if use_optuna is None:
         try:
-            import optuna  # noqa
+            import optuna
 
             use_optuna = True
         except Exception:
@@ -360,19 +278,23 @@ def optimize_go_for_seqds(
         return cfg
 
     def run_one_trial(cfg: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
-        """Train Node2Vec once, score GO embeddings (intrinsic + downstream)."""
-        edge_index, nodes = graph_cache.get_edge_index(
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.manual_seed(seed)
+
+        edge_index_full, nodes = graph_cache.get_edge_index(
             curated_only=cfg["curated_only"],
             no_term_edges=cfg["no_term_edges"],
             drop_roots=cfg["drop_roots"],
             prune_term_degree=cfg["prune_term_degree"],
         )
 
-        _cuda_mem_snapshot("trial/train begin")
-        _host_rss_snapshot("trial/train begin")
+        train_ei, _ = _split_gene_term_edges_for_eval(
+            edge_index_full, nodes, eval_frac=0.10, seed=seed
+        )
 
         emb = train_node2vec(
-            edge_index,
+            train_ei,
             dim=cfg["dim"],
             epochs=cfg["epochs"],
             batch_size=cfg["batch_size"],
@@ -382,31 +304,22 @@ def optimize_go_for_seqds(
             walks_per_node=cfg["walks_per_node"],
             neg_samples=cfg["neg_samples"],
             num_nodes=len(nodes),
+            seed=seed,
         )
 
-        _cuda_mem_snapshot("trial/after train (pre-clean)")
-        _host_rss_snapshot("trial/after train (pre-clean)")
-
-        # Intrinsic link prediction
-        link_res = _link_pred_score(edge_index, emb, nodes, seed=seed, mode="hard")
-
-        # Map to gene dict (CPU)
         gene2vec = {
             name[3:]: emb[i].astype(np.float32)
             for i, name in enumerate(nodes)
             if name.startswith("G::")
         }
-
-        # Assemble GO mats (CPU)
         dim_go = int(cfg["dim"])
         tr_go = _assemble_go_matrix(tr_genes, gene2vec, dim_go)
         va_go = _assemble_go_matrix(va_genes, gene2vec, dim_go)
 
-        # Downstream ClinVar probe
         res_val = {
-            "dna": _fit_eval_hgb(tr_dna, tr_y, va_dna, va_y),
-            "go": _fit_eval_hgb(tr_go, tr_y, va_go, va_y),
-            "both": _fit_eval_hgb(
+            "dna": _fit_eval_sgd(tr_dna, tr_y, va_dna, va_y),
+            "go": _fit_eval_sgd(tr_go, tr_y, va_go, va_y),
+            "both": _fit_eval_sgd(
                 np.concatenate([tr_dna, tr_go], axis=1),
                 tr_y,
                 np.concatenate([va_dna, va_go], axis=1),
@@ -414,52 +327,65 @@ def optimize_go_for_seqds(
             ),
         }
 
-        return float(link_res["roc"]), {"link": link_res, **res_val}
+        delta_pr = float(res_val["both"]["pr"] - res_val["dna"]["pr"])
+        delta_roc = float(res_val["both"]["roc"] - res_val["dna"]["roc"])
+
+        scores = {
+            "probe_val": res_val,
+            "delta_pr": delta_pr,
+            "delta_roc": delta_roc,
+        }
+
+        if objective_metric == "delta_pr":
+            obj = delta_pr
+        else:
+            obj = delta_roc
+        return float(obj), scores
 
     results = []
     if use_optuna:
         import optuna
 
         study = optuna.create_study(
-            direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=seed),
+            direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed)
         )
         pbar = tqdm(total=n_trials, desc="[HPO] trials", unit="trial")
 
         def objective(trial):
             cfg = sample_cfg(trial)
-            link_roc, res_val = run_one_trial(cfg)
+            obj_val, res_val = run_one_trial(cfg)
             results.append({"cfg": cfg, "scores": res_val})
+            trial.set_user_attr("val_delta_pr", res_val["delta_pr"])
+            trial.set_user_attr("val_delta_roc", res_val["delta_roc"])
             pbar.update(1)
-            trial.set_user_attr("link_roc", res_val["link"]["roc"])
-            trial.set_user_attr("link_pr", res_val["link"]["pr"])
-            trial.set_user_attr("roc_both", res_val["both"]["roc"])
-            return link_roc
+            return obj_val
 
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         pbar.close()
         best_cfg = {k: study.best_trial.params[k] for k in search_space.keys()}
         _, best_res_val = run_one_trial(best_cfg)
     else:
-        raise ValueError("[HPO] Optuna not available; random search.")
+        raise ValueError("[HPO] Optuna not available")
 
-    # ----- Refit best with more epochs -----
     print(
-        f"\n[REFIT] best link ROC={best_res_val['link']['roc']:.4f} "
-        f"→ epochs={refit_epochs}"
+        f"\n[REFIT] best {objective_metric}="
+        f"{best_res_val.get(objective_metric, 0.0):.4f} → epochs={refit_epochs}"
     )
     refit_cfg = dict(best_cfg)
     refit_cfg["epochs"] = refit_epochs
 
-    edge_index, nodes = graph_cache.get_edge_index(
+    edge_index_full, nodes = graph_cache.get_edge_index(
         curated_only=refit_cfg["curated_only"],
         no_term_edges=refit_cfg["no_term_edges"],
         drop_roots=refit_cfg["drop_roots"],
         prune_term_degree=refit_cfg["prune_term_degree"],
     )
+    train_ei, _ = _split_gene_term_edges_for_eval(
+        edge_index_full, nodes, eval_frac=0.10, seed=seed
+    )
 
     emb_final = train_node2vec(
-        edge_index,
+        train_ei,
         dim=refit_cfg["dim"],
         epochs=refit_cfg["epochs"],
         batch_size=refit_cfg["batch_size"],
@@ -469,9 +395,9 @@ def optimize_go_for_seqds(
         walks_per_node=refit_cfg["walks_per_node"],
         neg_samples=refit_cfg["neg_samples"],
         num_nodes=len(nodes),
+        seed=seed,
     )
 
-    # Save genes only
     gene_idx = [i for i, n in enumerate(nodes) if n.startswith("G::")]
     gene_names = [nodes[i][3:] for i in gene_idx]
     mat = emb_final[gene_idx].astype(np.float32)
@@ -496,15 +422,17 @@ def optimize_go_for_seqds(
 # ---------------------------
 def print_go_opt_summary(summary: Dict[str, Any]):
     s = summary["val_scores"]
-    print("\n[GO HPO] Validation scores")
-    print("Intrinsic link-pred (GO graph):")
-    print(f"  ROC={s['link']['roc']:.4f}  PR={s['link']['pr']:.4f}")
-    print("\nClinVar probe (HGB, downstream):")
-    print(f"{'Feat':6} {'Acc':>8} {'F1':>8} {'ROC':>8} {'PR':>8}")
-    print("-" * 42)
-    for k in ("dna", "go", "both"):
-        r = s[k]
-        print(f"{k:6} {r['acc']:8.4f} {r['f1']:8.4f} {r['roc']:8.4f} {r['pr']:8.4f}")
+    print("\n[GO HPO] Validation scores (downstream probe)")
+    if "probe_val" in s:
+        pv = s["probe_val"]
+        print(f"  dna : ROC={pv['dna']['roc']:.4f}  PR={pv['dna']['pr']:.4f}")
+        print(f"  go  : ROC={pv['go']['roc']:.4f}  PR={pv['go']['pr']:.4f}")
+        print(f"  both: ROC={pv['both']['roc']:.4f} PR={pv['both']['pr']:.4f}")
+        if "delta_pr" in s:
+            print(f"  ΔPR (both - dna): {s['delta_pr']:.4f}")
+        if "delta_roc" in s:
+            print(f"  ΔROC(both - dna): {s['delta_roc']:.4f}")
+
     print("\nBest (refit) config:")
     for k, v in summary["best_cfg"].items():
         print(f"  {k:16} = {v}")

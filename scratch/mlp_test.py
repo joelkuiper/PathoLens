@@ -1,7 +1,7 @@
 # src/ablation_probe.py
 # -*- coding: utf-8 -*-
 """
-Ablation MLP probe for PathoLens / VarCLIP (no PCA)
+Ablation MLP probe for PathoLens
 ---------------------------------------------------
 
 Trains a small MLP on features from SequenceTowerDataset and evaluates:
