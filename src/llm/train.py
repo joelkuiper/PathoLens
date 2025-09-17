@@ -1,3 +1,4 @@
+# src/llm/train.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os
@@ -42,6 +43,7 @@ class CondTrainer(Trainer):
         )
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # unpack
         inputs = dict(inputs)
         input_ids = inputs.pop("input_ids")
         attention_mask = inputs.pop("attention_mask", None)
@@ -49,11 +51,40 @@ class CondTrainer(Trainer):
         label_weights = inputs.pop("label_weights", None)
         cond_vec = inputs.pop("cond_vec")
 
-        txt_emb = model.get_input_embeddings()(input_ids)
+        # ===== fast dimension guard (catches dataset/model mismatch) =====
+        expected_d = getattr(getattr(model, "cond_projector", None), "net", [None])[0]
+        if hasattr(expected_d, "in_features"):
+            exp = int(expected_d.in_features)
+            got = int(cond_vec.shape[-1])
+            if got != exp:
+                raise RuntimeError(
+                    f"[CondTrainer] cond_vec dim mismatch: got {got}, expected {exp}. "
+                    "Check D_eff/D_go/D_prot in dataset vs projector build."
+                )
+
+        # default attention mask if missing
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+        # embeddings
+        tok_emb = model.get_input_embeddings()
+        txt_emb = tok_emb(input_ids)
         cond_vec = cond_vec.to(device=txt_emb.device, dtype=txt_emb.dtype)
-        cond_emb = model.cond_projector(cond_vec)
+        cond_emb = model.cond_projector(cond_vec)  # [B, K, H]
+
+        # ===== PROMPT DROPOUT =====
+        p_drop = float(getattr(model, "prompt_dropout_prob", 0.0))
+        if p_drop > 0.0 and self.model.training:
+            B = txt_emb.size(0)
+            drop_mask = torch.rand(B, device=txt_emb.device) < p_drop
+            if drop_mask.any():
+                txt_emb = txt_emb.clone()
+                txt_emb[drop_mask] = 0.0
+
+        # concat cond tokens before text tokens
         inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
 
+        # extend masks/labels to account for cond tokens
         if attention_mask is not None:
             B, K = attention_mask.size(0), cond_emb.size(1)
             ones = torch.ones(
@@ -71,10 +102,19 @@ class CondTrainer(Trainer):
             )
             label_weights = torch.cat([zeros, label_weights], dim=1)
 
+        # optional position ids (future-proof with left padding)
+        pos_ids = torch.arange(
+            inputs_embeds.size(1), device=inputs_embeds.device
+        ).unsqueeze(0)
+
         out = model(
-            inputs_embeds=inputs_embeds, attention_mask=attention_mask, use_cache=False
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=pos_ids,
+            use_cache=False,
         )
         logits = out.logits
+
         if labels is None:
             loss = (
                 out.loss
@@ -83,24 +123,22 @@ class CondTrainer(Trainer):
             )
         else:
             shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[
-                :,
-                1:,
-            ].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
             shift_w = (
-                label_weights[
-                    :,
-                    1:,
-                ].contiguous()
+                label_weights[:, 1:].contiguous()
                 if label_weights is not None
                 else torch.ones_like(shift_labels, dtype=torch.float32)
             )
             loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
             loss_tok = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
             ).view_as(shift_labels)
             valid = (shift_labels != -100).float()
-            loss = (loss_tok * shift_w * valid).sum() / valid.sum().clamp_min(1.0)
+            denom = valid.sum().clamp_min(1.0)
+            loss = (loss_tok * shift_w * valid).sum() / denom
+            if torch.isnan(loss) or torch.isinf(loss):
+                loss = torch.zeros((), device=logits.device, dtype=logits.dtype)
 
         return (loss, out) if return_outputs else loss
 
@@ -161,8 +199,9 @@ def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
         y = _true_label_from_meta(row)
         ys.append(int(0 if y is None else y))
     ys = np.asarray(ys)
+    ys = (ys > 0).astype(np.int64)
     n_pos = max(1, int(ys.sum()))
-    n_neg = max(1, int((1 - ys).sum()))
+    n_neg = max(1, int((ys == 0).sum()))
     w_pos, w_neg = 1.0 / n_pos, 1.0 / n_neg
     weights = np.where(ys == 1, w_pos, w_neg).astype("float32")
     return WeightedRandomSampler(
@@ -222,6 +261,8 @@ def run_llm_pipeline(
     group_by_length: bool = False,
     drop_last: bool = True,
     balanced_sampling: bool = True,
+    n_cond_tokens: int = 8,  # default k=8
+    prompt_dropout_prob: float = 0.3,  # drop prompt this fraction of the time
 ) -> Dict[str, Any]:
     os.makedirs(out_dir, exist_ok=True)
     set_all_seeds(seed)
@@ -241,20 +282,34 @@ def run_llm_pipeline(
         drop_last=drop_last,
         seed=seed,
     )
+    setattr(cfg, "n_cond_tokens", n_cond_tokens)
 
-    tok, base_model, projector = build_qwen_with_lora(
-        cfg, seq_ds["train"].D_eff + seq_ds["train"].D_go
-    )
+    # Compute *true* conditioning dim from dataset (includes protein if present)
+    D_eff = int(seq_ds["train"].D_eff)
+    D_go = int(seq_ds["train"].D_go)
+    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
+    D_cond = D_eff + D_go + D_prot
+    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})")
 
+    # build model with matching projector input
+    tok, base_model, projector = build_qwen_with_lora(cfg, D_cond)
+
+    # attach prompt dropout knob
+    base_model.prompt_dropout_prob = float(prompt_dropout_prob)
     base_model.config.use_cache = False
 
     print("[DEBUG] Building CondTextDataset(train/val) ...")
     train_ds = CondTextDataset(seq_ds["train"], tokenizer=tok)
     val_ds = CondTextDataset(seq_ds["val"], tokenizer=tok)
+    # sanity: dataset D_cond must match projector's in_features
+    assert train_ds.D_cond == D_cond == val_ds.D_cond, (
+        f"D_cond mismatch: dataset(train)={train_ds.D_cond}, dataset(val)={val_ds.D_cond}, "
+        f"projector_in={projector.net[0].in_features}"
+    )
+
     collator = make_collator(tok, max_len=cfg.max_len)
     smoke_checks(seq_ds, tok, cfg)
 
-    # Balanced sampler
     sampler = _make_balanced_sampler(train_ds) if balanced_sampling else None
 
     args = TrainingArguments(
@@ -271,19 +326,23 @@ def run_llm_pipeline(
         eval_steps=500,
         save_strategy="steps",
         save_steps=1000,
-        bf16=cfg.bf16,
+        bf16=(
+            True
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+            else False
+        ),
         gradient_checkpointing=False,
         report_to="none",
         remove_unused_columns=False,
-        dataloader_num_workers=cfg.num_workers,
-        dataloader_pin_memory=cfg.pin_memory,
+        dataloader_num_workers=num_workers,
+        dataloader_pin_memory=pin_memory,
         dataloader_prefetch_factor=None,
         dataloader_persistent_workers=False,
-        group_by_length=cfg.group_by_length,
+        group_by_length=group_by_length,
         optim="paged_adamw_8bit",
         tf32=True,
-        seed=cfg.seed,
-        data_seed=cfg.seed,
+        seed=seed,
+        data_seed=seed,
     )
 
     trainer = CondTrainer(
@@ -297,7 +356,7 @@ def run_llm_pipeline(
     )
 
     dev = next(base_model.parameters()).device
-    print(f"[INFO] Device: {dev} | CUDA={torch.cuda.is_available()} | bf16={cfg.bf16}")
+    print(f"[INFO] Device: {dev} | CUDA={torch.cuda.is_available()} | bf16={args.bf16}")
     if torch.cuda.is_available():
         free, total = torch.cuda.mem_get_info()
         print(f"[INFO] GPU mem: free={free / 1e9:.2f}G total={total / 1e9:.2f}G")

@@ -1,3 +1,4 @@
+# src/llm/data.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Tuple
@@ -7,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from .config import PROMPT_TMPL
 from .chat import build_chat_strings
+
 
 def row_to_example(meta_row) -> Tuple[str, str]:
     """Training target is just the label: 'Benign' or 'Pathogenic'."""
@@ -19,20 +21,44 @@ def row_to_example(meta_row) -> Tuple[str, str]:
 
 # ---------- Dataset ----------
 class CondTextDataset(Dataset):
+    """
+    Builds conditioning vectors from SequenceTowerDataset samples.
+
+    Assumes each sample returns:
+        v, *_  where v packs  [ dna_eff | go_vec | (optional) prot_eff ]
+
+    We *explicitly* slice to D_cond = D_eff + D_go + D_prot
+    so any future additions to v won't silently leak in.
+    """
+
     def __init__(self, seq_ds, tokenizer=None):
         t0 = time.time()
         self.seq_ds = seq_ds
         self.meta = seq_ds.meta
-        self.D_cond = seq_ds.D_eff + seq_ds.D_go
-        print(f"[DEBUG] Dataset ready. Build time: {time.time() - t0:.2f}s")
+        # NEW: include protein block if present (0 if absent)
+        D_eff = int(getattr(seq_ds, "D_eff", 0) or 0)
+        D_go = int(getattr(seq_ds, "D_go", 0) or 0)
+        D_prot = int(getattr(seq_ds, "D_prot", 0) or 0)
+        self.D_eff, self.D_go, self.D_prot = D_eff, D_go, D_prot
+        self.D_cond = D_eff + D_go + D_prot
+        print(
+            f"[DEBUG] CondTextDataset: D_eff={D_eff} D_go={D_go} D_prot={D_prot} "
+            f"=> D_cond={self.D_cond} | Build time: {time.time() - t0:.2f}s"
+        )
 
     def __len__(self):
         return len(self.seq_ds)
 
     def __getitem__(self, i: int):
-        x, _, _ = self.seq_ds[i]
-        cond = x.numpy().astype("float32")
-        cond /= np.linalg.norm(cond) + 1e-6
+        x, *_ = self.seq_ds[i]  # v contains [dna | go | (prot?)]
+        x = x if isinstance(x, np.ndarray) else x.numpy()
+        x = x.astype("float32", copy=False)
+
+        # Slice *exactly* the conditioning span
+        cond = x[: self.D_cond]
+        # Safe L2 norm
+        cond /= (np.linalg.norm(cond) + 1e-6).astype("float32")
+
         prompt, target = row_to_example(self.meta.iloc[i])
         return {"cond_vec": cond, "prompt": prompt, "target": target}
 
@@ -108,20 +134,17 @@ def make_collator(
             for i, ids in enumerate(ids_list):
                 start = int(prompt_lens[i])  # only consider assistant region
                 seek_from = start
-                # handle multiple think blocks just in case
                 while True:
                     j = _find_subseq(ids, tok_TOPEN, seek_from)
                     if j == -1:
                         break
                     k = _find_subseq(ids, tok_TCLOSE, j + len(tok_TOPEN))
                     if k == -1:
-                        # unmatched close; stop masking (or mask to end if you prefer)
                         break
                     k2 = k + len(tok_TCLOSE)
-                    # mask labels and zero weight over the think region
                     labels[i, j:k2] = -100
                     label_weights[i, j:k2] = 0.0
-                    seek_from = k2  # continue searching after this block
+                    seek_from = k2
 
         cond_vec = torch.from_numpy(
             np.stack([b["cond_vec"] for b in batch]).astype("float32")
@@ -130,7 +153,8 @@ def make_collator(
         dt = time.time() - t0
         if dt > 0.2:
             print(
-                f"[DEBUG] Collator latency: {dt:.3f}s batch_size={len(batch)} (tokenizer likely the bottleneck)"
+                f"[DEBUG] Collator latency: {dt:.3f}s batch_size={len(batch)} "
+                f"(tokenizer likely the bottleneck)"
             )
 
         return {
