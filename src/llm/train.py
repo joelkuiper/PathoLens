@@ -10,6 +10,7 @@ from typing import Any, Dict
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import (
     Trainer,
@@ -46,13 +47,16 @@ class CondTrainer(Trainer):
         )
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # unpack
+        # -------------------
+        # Unpack inputs
+        # -------------------
         inputs = dict(inputs)
         input_ids = inputs.pop("input_ids")
         attention_mask = inputs.pop("attention_mask", None)
         labels = inputs.pop("labels", None)
         label_weights = inputs.pop("label_weights", None)
         cond_vec = inputs.pop("cond_vec")
+        gold_y = inputs.pop("_y", None)  # sequence-level class label
 
         # ===== fast dimension guard (catches dataset/model mismatch) =====
         expected_d = getattr(getattr(model, "cond_projector", None), "net", [None])[0]
@@ -69,15 +73,19 @@ class CondTrainer(Trainer):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
-        # embeddings
+        # -------------------
+        # Embeddings
+        # -------------------
         tok_emb = model.get_input_embeddings()
         txt_emb = tok_emb(input_ids)
         cond_vec = cond_vec.to(device=txt_emb.device, dtype=txt_emb.dtype)
-        cond_emb = model.cond_projector(cond_vec)  # [B, K, H]
+
+        # Projector now returns: cond tokens, aux logits
+        cond_emb, aux_logits = model.cond_projector(cond_vec)  # (B, K, H), (B, 2)
 
         # ===== PROMPT DROPOUT =====
         p_drop = float(getattr(model, "prompt_dropout_prob", 0.0))
-        if p_drop > 0.0 and self.model.training:
+        if p_drop > 0.0 and model.training:
             B = txt_emb.size(0)
             drop_mask = torch.rand(B, device=txt_emb.device) < p_drop
             if drop_mask.any():
@@ -105,11 +113,14 @@ class CondTrainer(Trainer):
             )
             label_weights = torch.cat([zeros, label_weights], dim=1)
 
-        # optional position ids (future-proof with left padding)
+        # optional position ids
         pos_ids = torch.arange(
             inputs_embeds.size(1), device=inputs_embeds.device
         ).unsqueeze(0)
 
+        # -------------------
+        # Forward through model
+        # -------------------
         out = model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -118,8 +129,11 @@ class CondTrainer(Trainer):
         )
         logits = out.logits
 
+        # -------------------
+        # LM loss
+        # -------------------
         if labels is None:
-            loss = (
+            lm_loss = (
                 out.loss
                 if hasattr(out, "loss")
                 else torch.tensor(0.0, device=logits.device)
@@ -139,225 +153,25 @@ class CondTrainer(Trainer):
             ).view_as(shift_labels)
             valid = (shift_labels != -100).float()
             denom = valid.sum().clamp_min(1.0)
-            loss = (loss_tok * shift_w * valid).sum() / denom
-            if torch.isnan(loss) or torch.isinf(loss):
-                loss = torch.zeros((), device=logits.device, dtype=logits.dtype)
+            lm_loss = (loss_tok * shift_w * valid).sum() / denom
+            if torch.isnan(lm_loss) or torch.isinf(lm_loss):
+                lm_loss = torch.zeros((), device=logits.device, dtype=logits.dtype)
 
-        return (loss, out) if return_outputs else loss
+        # -------------------
+        # Aux classification loss
+        # -------------------
+        aux_loss = None
+        if gold_y is not None and aux_logits is not None:
+            gold_y = gold_y.to(aux_logits.device, dtype=torch.long)
+            aux_loss = F.cross_entropy(aux_logits, gold_y)
 
+        # -------------------
+        # Total loss
+        # -------------------
+        lambda_aux = float(getattr(model, "aux_loss_weight", 1.0))
+        if aux_loss is not None:
+            total_loss = lm_loss + lambda_aux * aux_loss
+        else:
+            total_loss = lm_loss
 
-class _FirstStepTimerCallback(TrainerCallback):
-    def __init__(self):
-        self._t0 = None
-        self._stepped = False
-
-    def on_init_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        print("[DEBUG] Trainer init complete.")
-        return control
-
-    def on_train_begin(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        self._t0 = time.time()
-        self._stepped = False
-        print("[DEBUG] Training started ...")
-        return control
-
-    def on_step_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        if not self._stepped:
-            self._stepped = True
-            dt = time.time() - (self._t0 or time.time())
-            print(f"[DEBUG] Time to first optimizer step: {dt:.2f}s")
-        return control
-
-
-def _true_label_from_meta(row) -> int | None:
-    y = row.get("_y", None)
-    try:
-        return int(y) if y is not None else None
-    except Exception:
-        return None
-
-
-def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
-    ys = []
-    for i in range(len(train_ds)):
-        row = train_ds.meta.iloc[i]
-        y = _true_label_from_meta(row)
-        ys.append(int(0 if y is None else y))
-    ys = np.asarray(ys)
-    ys = (ys > 0).astype(np.int64)
-    n_pos = max(1, int(ys.sum()))
-    n_neg = max(1, int((ys == 0).sum()))
-    w_pos, w_neg = 1.0 / n_pos, 1.0 / n_neg
-    weights = np.where(ys == 1, w_pos, w_neg).astype("float32")
-    return WeightedRandomSampler(
-        weights=torch.from_numpy(weights), num_samples=len(train_ds), replacement=True
-    )
-
-
-def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMRunConfig):
-    print("\n========== SMOKE CHECKS ==========")
-    total_train, total_val = len(seq_ds_dict["train"]), len(seq_ds_dict["val"])
-    print(f"[SMOKE] Train size: {total_train}  |  Val size: {total_val}")
-
-    from collections import Counter
-
-    def label_stats(ds, N=5000):
-        ys = []
-        for i in range(min(len(ds), N)):
-            row = ds.meta.iloc[i]
-            y = _true_label_from_meta(row)
-            if y is not None:
-                ys.append(int(y))
-        c = Counter(ys)
-        return {"n": len(ys), "pos": c.get(1, 0), "neg": c.get(0, 0)}
-
-    tr = label_stats(seq_ds_dict["train"])
-    va = label_stats(seq_ds_dict["val"])
-    print(
-        f"[SMOKE] Label coverage (≤5k): train n={tr['n']} (+:{tr['pos']}, -:{tr['neg']}), val n={va['n']} (+:{va['pos']}, -:{va['neg']})"
-    )
-
-    row0 = seq_ds_dict["train"].meta.iloc[0]
-    ctx0 = row0.get("context", "")
-    from .chat import build_chat_strings
-
-    p0 = f"Variant context (no phenotype):\n{ctx0}\n\nReturn label now:"
-    pr, fu = build_chat_strings(tokenizer, [p0], ["Benign"])
-    print("[SMOKE] Example context:\n", ctx0)
-    print("[SMOKE] Chat prompt (trunc 200):", pr[0][:200].replace("\n", "\\n"), "...")
-    print("[SMOKE] Chat full   (trunc 200):", fu[0][:200].replace("\n", "\\n"), "...")
-
-
-def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, Any]:
-    out_dir = Path(cfg.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    set_all_seeds(cfg.seed)
-
-    # Compute *true* conditioning dim from dataset (includes protein if present)
-    D_eff = int(seq_ds["train"].D_eff)
-    D_go = int(seq_ds["train"].D_go)
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-    D_cond = D_eff + D_go + D_prot
-    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})")
-
-    # build model with matching projector input
-    tok, base_model, projector = build_qwen_with_lora(cfg, D_cond)
-
-    # attach prompt dropout knob
-    base_model.prompt_dropout_prob = float(cfg.prompt_dropout_prob)
-    base_model.config.use_cache = False
-
-    print("[DEBUG] Building CondTextDataset(train/val) ...")
-    train_ds = CondTextDataset(seq_ds["train"], tokenizer=tok)
-    val_ds = CondTextDataset(seq_ds["val"], tokenizer=tok)
-    # sanity: dataset D_cond must match projector's in_features
-    assert train_ds.D_cond == D_cond == val_ds.D_cond, (
-        f"D_cond mismatch: dataset(train)={train_ds.D_cond}, dataset(val)={val_ds.D_cond}, "
-        f"projector_in={projector.net[0].in_features}"
-    )
-
-    collator = make_collator(tok, max_len=cfg.max_len)
-    smoke_checks(seq_ds, tok, cfg)
-
-    sampler = _make_balanced_sampler(train_ds) if cfg.balanced_sampling else None
-
-    args = TrainingArguments(
-        output_dir=str(out_dir),
-        per_device_train_batch_size=cfg.per_device_bs,
-        per_device_eval_batch_size=cfg.per_device_bs,
-        gradient_accumulation_steps=cfg.grad_accum,
-        learning_rate=cfg.lr,
-        weight_decay=0.01,
-        num_train_epochs=cfg.epochs,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
-        logging_steps=50,
-        eval_steps=500,
-        save_strategy="steps",
-        save_steps=1000,
-        bf16=(
-            True
-            if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-            else False
-        ),
-        gradient_checkpointing=False,
-        report_to="none",
-        remove_unused_columns=False,
-        dataloader_num_workers=cfg.num_workers,
-        dataloader_pin_memory=cfg.pin_memory,
-        dataloader_prefetch_factor=(
-            cfg.prefetch_factor if cfg.num_workers > 0 else None
-        ),
-        dataloader_persistent_workers=cfg.persistent_workers,
-        group_by_length=cfg.group_by_length,
-        optim="paged_adamw_8bit",
-        tf32=True,
-        seed=cfg.seed,
-        data_seed=cfg.seed,
-    )
-
-    trainer = CondTrainer(
-        model=base_model,
-        args=args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
-        data_collator=collator,
-        callbacks=[_FirstStepTimerCallback()],
-        train_sampler=sampler,
-    )
-
-    dev = next(base_model.parameters()).device
-    print(f"[INFO] Device: {dev} | CUDA={torch.cuda.is_available()} | bf16={args.bf16}")
-    if torch.cuda.is_available():
-        free, total = torch.cuda.mem_get_info()
-        print(f"[INFO] GPU mem: free={free / 1e9:.2f}G total={total / 1e9:.2f}G")
-        print("[INFO] TF32:", torch.backends.cuda.matmul.allow_tf32)
-
-    print("[DEBUG] Probing first training batch...")
-    t0 = time.time()
-    batch = next(iter(trainer.get_train_dataloader()))
-    print(f"[DEBUG] Got first batch in {time.time() - t0:.2f}s")
-    for k, v in batch.items():
-        print(f"  {k}: shape={tuple(v.shape)} dtype={getattr(v, 'dtype', None)}")
-
-    trainer.train()
-
-    base_model.save_pretrained(str(out_dir / "adapter"))
-    torch.save(projector.state_dict(), out_dir / "projector.pt")
-    print("[INFO] Saved adapter + projector.")
-
-    # Quick eval using label scoring
-    from .infer import quick_eval_pathogenicity_binary
-
-    print("[INFO] Running quick eval on val split ...")
-    eval_res = quick_eval_pathogenicity_binary(base_model, tok, seq_ds["val"], n=512)
-    print(
-        "[INFO] Eval:",
-        json.dumps(
-            {
-                k: v
-                for k, v in eval_res.items()
-                if k in ("n", "accuracy", "precision", "recall", "f1")
-            },
-            indent=2,
-        ),
-    )
-    return {"eval": eval_res, "out_dir": str(out_dir)}
+        return (total_loss, out) if return_outputs else total_loss

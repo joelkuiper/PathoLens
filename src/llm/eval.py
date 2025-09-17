@@ -1,6 +1,6 @@
 # src/llm/eval.py
 # -*- coding: utf-8 -*-
-# Batched evaluation (compat with eval_old prompt path) + AUC + feather + optional label→rationale.
+# Batched evaluation + AUC + feather + optional label→rationale.
 # Notes:
 # - Ground truth is NEVER inserted into prompts or scoring. It is read only to compute metrics.
 # - Rationales are generated AFTER predicting the label, and are conditioned on the PREDICTED label only.
@@ -24,11 +24,24 @@ from src.clinvar import (
     parse_hgvsc_features,
 )
 
+# --- Debug env toggles ---
+_ENV_PROBE = os.environ.get("PATHOLENS_PROBE_PROMPTS", "0") == "1"
+
+# Regexes used to sanity-check that the prompt actually looks blank
+_RX_HGVS_P = re.compile(r"(?i)\bp\.(?!\[)[A-Za-z0-9_=*]+")
+_RX_HGVS_C = re.compile(r"(?i)\bc\.(?!\[)[A-Za-z0-9_+\-*>=<]+")
+_RX_LABELS = re.compile(r"(?i)\b(benign|pathogenic)\b")
+
 
 # -----------------------
 # Context building & hygiene
 # -----------------------
 def build_ctx_from_row(row) -> str:
+    """
+    Build the user-visible context string for the prompt.
+    IMPORTANT: If no context can be built, returns the EMPTY string (""),
+    not a fallback phrase. This is critical for 'cond only' ablations.
+    """
     ctx = row.get("context", "")
     if isinstance(ctx, str) and ctx.strip():
         return ctx
@@ -66,7 +79,9 @@ def build_ctx_from_row(row) -> str:
         )
     if cfeat["snv_change"]:
         lines.append(f"SNV change: {cfeat['snv_change']}")
-    return "\n".join(lines) if lines else "Variant context provided."
+
+    # CRITICAL: if nothing could be built, return truly empty
+    return "\n".join(lines) if lines else ""
 
 
 def sanitize_model_text(text: str) -> str:
@@ -114,11 +129,59 @@ def _apply_chat_template(tokenizer, prompts: List[str]) -> Dict[str, torch.Tenso
     )
 
 
+def _probe_prompt_strings(prompts: List[str], tag: str = "probe"):
+    """Print stats that prove emptiness (or not) of prompts."""
+    n = len(prompts)
+    if n == 0:
+        print(f"[{tag}] no prompts")
+        return
+    # Basic stats
+    lengths = [len(p) for p in prompts]
+    n_blank = sum(1 for p in prompts if p.strip() == "")
+    n_hgvsc = sum(1 for p in prompts if _RX_HGVS_C.search(p or ""))
+    n_hgvsp = sum(1 for p in prompts if _RX_HGVS_P.search(p or ""))
+    n_labels = sum(1 for p in prompts if _RX_LABELS.search(p or ""))
+
+    print(
+        f"[{tag}] prompts={n} blank={n_blank} "
+        f"len[min/med/max]={min(lengths)}/{int(np.median(lengths))}/{max(lengths)} "
+        f"HGVS.c hits={n_hgvsc} HGVS.p hits={n_hgvsp} label-word hits={n_labels}"
+    )
+    # Show up to 3 examples (hash + visible)
+    for i in range(min(3, n)):
+        s = prompts[i] or ""
+        sha = _sha10(s)
+        head = s.replace("\n", "\\n")[:180]
+        print(f"[{tag}] i={i} sha={sha} text='{head}{'…' if len(s) > 180 else ''}'")
+
+
+def _sha10(s: str) -> str:
+    import hashlib
+
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:10]
+
+
 @torch.inference_mode()
-def _prep_inputs_embeds(model, tokenizer, prompts: List[str], cond_vecs: np.ndarray):
+def _prep_inputs_embeds(
+    model, tokenizer, prompts: List[str], cond_vecs: np.ndarray, *, debug_probe=False
+):
+    # Optional: probe raw prompts before tokenization
+    if debug_probe or _ENV_PROBE:
+        _probe_prompt_strings(prompts, tag="prompt-probe(raw)")
+
     enc = _apply_chat_template(tokenizer, prompts)
     dev = next(model.parameters()).device
     enc = {k: v.to(dev) for k, v in enc.items()}
+
+    # Optional: probe token lengths
+    if debug_probe or _ENV_PROBE:
+        attn = enc["attention_mask"].cpu().numpy()
+        toks = enc["input_ids"].cpu().numpy()
+        tok_lens = attn.sum(axis=1).tolist()
+        print(
+            f"[prompt-probe(tok)] batches={len(tok_lens)} "
+            f"tok_len[min/med/max]={min(tok_lens)}/{int(np.median(tok_lens))}/{max(tok_lens)}"
+        )
 
     E = model.get_input_embeddings()
     txt_emb = E(enc["input_ids"])  # [B,T,H]
@@ -210,10 +273,7 @@ def _generate_rationale_with_seed(
     min_new_tokens: int = 12,
     repetition_penalty: float = 1.05,
 ) -> str:
-    """Generate a one-sentence rationale while LoRA + conditioning are active.
-    We prepend the cond embeddings, then the chat prompt, then an ASSISTANT-PREFIX
-    embedding for `seed_text` so decoding starts after that seed.
-    """
+    """Generate a one-sentence rationale while LoRA + conditioning are active."""
     dev = next(model.parameters()).device
     msgs = [
         {"role": "system", "content": CHAT_SYSTEM},
@@ -276,7 +336,7 @@ def _generate_rationale_with_seed(
         return ""
     if len(txt.strip()) < 10:
         return ""
-    # Trim if it keeps the seeded "Because" duplicated; keep a single sentence.
+    # Trim to a single sentence.
     txt = re.split(r"(?<=[.!?])\s", txt.strip())[0]
     return txt
 
@@ -297,12 +357,10 @@ def evaluate_split_batched(
     rationale_temp: float = 0.9,
     rationale_top_p: float = 0.92,
     guard_prompts: bool = True,
+    debug_prompt_probe: bool = False,
 ) -> Dict[str, Any]:
     """
     IMPORTANT: We do NOT insert ground-truth anywhere into the prompt or scoring.
-    Ground-truth labels are read only AFTER predictions to compute metrics.
-    Rationales (if requested) are generated AFTER label prediction and are
-    conditioned only on the PREDICTED label. LoRA + conditioning remain active.
     """
     from sklearn.metrics import (
         accuracy_score,
@@ -316,7 +374,6 @@ def evaluate_split_batched(
     adapter_dir = os.path.join(out_dir, "adapter")
     projector_path = os.path.join(out_dir, "projector.pt")
 
-    # --- FIX: correct D_cond to include protein if present ---
     D_eff = int(seq_ds["train"].D_eff)
     D_go = int(seq_ds["train"].D_go)
     D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
@@ -329,7 +386,7 @@ def evaluate_split_batched(
     ds = seq_ds[split]
     N_all = len(ds)
 
-    # Evaluate all rows (we assume _y is already in meta for scoring)
+    # Evaluate all rows
     idxs = list(range(N_all))
     if max_n is not None:
         idxs = idxs[:max_n]
@@ -337,14 +394,23 @@ def evaluate_split_batched(
     if N == 0:
         return {"n": 0, "note": f"No samples in split '{split}'."}
 
-    # (Optional) sanity guard: no explicit label words in prompts
-    if guard_prompts:
+    # (Optional) sanity guard: no explicit label words in prompts; also probe HGVS content
+    if guard_prompts or debug_prompt_probe or _ENV_PROBE:
         leaks = 0
-        for i in idxs[: min(2000, len(idxs))]:
-            p = PROMPT_TMPL.format(ctx=build_ctx_from_row(ds.meta.iloc[i]))
+        hg_hits = 0
+        probe_prompts: List[str] = []
+        cap = min(2000, len(idxs))
+        for i in idxs[:cap]:
+            ctx = build_ctx_from_row(ds.meta.iloc[i])
+            p = PROMPT_TMPL.format(ctx=ctx)
             if ("Benign" in p) or ("Pathogenic" in p):
                 leaks += 1
+            if _RX_HGVS_C.search(p) or _RX_HGVS_P.search(p):
+                hg_hits += 1
+            probe_prompts.append(p)
         assert leaks == 0, f"Prompt leakage: {leaks} prompts include label words."
+        if debug_prompt_probe or _ENV_PROBE:
+            _probe_prompt_strings(probe_prompts[:64], tag="prompt-probe(prebatch)")
 
     # Prepare tokenizations for labels once
     cand = {
@@ -358,6 +424,7 @@ def evaluate_split_batched(
     examples: List[Dict[str, Any]] = []
 
     # Batched scoring — matches eval_old path
+    first_batch_done = False
     for bi in tqdm(range(0, N, batch_size), desc=f"Scoring [{split}]", unit="batch"):
         batch_idxs = idxs[bi : bi + batch_size]
 
@@ -366,12 +433,26 @@ def evaluate_split_batched(
         for i in batch_idxs:
             x, *_ = ds[i]
             conds.append(x.numpy())
+
+            # normal context build
             ctx = build_ctx_from_row(ds.meta.iloc[i])
+
+            # if flagged by ablation: force ctx blank
+            if getattr(ds, "_force_blank_prompts", False):
+                ctx = ""
+
             prompts.append(PROMPT_TMPL.format(ctx=ctx))
             y_batch.append(int(ds.meta.iloc[i]["_y"]))
 
+        # One-off: deeper probe for the first batch actually used
+        if (debug_prompt_probe or _ENV_PROBE) and not first_batch_done:
+            _probe_prompt_strings(prompts, tag="prompt-probe(batch0)")
+            first_batch_done = True
+
         conds = np.stack(conds, axis=0)
-        inp_emb, attn = _prep_inputs_embeds(model, tok, prompts, conds)
+        inp_emb, attn = _prep_inputs_embeds(
+            model, tok, prompts, conds, debug_probe=(debug_prompt_probe or _ENV_PROBE)
+        )
 
         # Teacher-forced label logprobs
         lp_b_list, lp_p_list = [], []
@@ -401,7 +482,6 @@ def evaluate_split_batched(
 
         y_true.extend(y_batch)
         y_pred.extend(yhat_batch.tolist())
-        # clamp to valid [0,1] just in case
         prob_pathogenic.extend(np.clip(prob_p, 0.0, 1.0).tolist())
 
         # log a few examples
@@ -420,10 +500,15 @@ def evaluate_split_batched(
                 )
 
     # Metrics
-    from math import isnan, isfinite
-
     acc = float(np.mean(np.array(y_pred) == np.array(y_true))) if y_true else 0.0
-    p, r, f1, _ = torchmetrics_safe_prf(y_true, y_pred)
+    p, r, f1 = torchmetrics_safe_prf(y_true, y_pred)
+
+    from sklearn.metrics import (
+        confusion_matrix,
+        classification_report,
+        roc_auc_score,
+        average_precision_score,
+    )
 
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
     report = classification_report(
@@ -478,9 +563,8 @@ def evaluate_split_batched(
             ctx = build_ctx_from_row(row)
             prompt = PROMPT_TMPL.format(ctx=ctx)
 
-            # Decide predicted label (single-item scoring)
             inp_emb, attn = _prep_inputs_embeds(
-                model, tok, [prompt], cond_vec[np.newaxis, :]
+                model, tok, [prompt], cond_vec[np.newaxis, :], debug_probe=False
             )
             best_b = max(
                 (

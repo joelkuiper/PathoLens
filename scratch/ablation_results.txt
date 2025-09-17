@@ -24,3 +24,25 @@ prompt   HGVS.p only            -   1000   0.7900   0.8416     0.8847     0.9515
 - gene only          (seed=None)  ΔAcc=-0.5150  ΔF1=-0.7865  ΔROC-AUC=-0.3046  ΔPR-AUC=-0.1881
 - HGVS.c only        (seed=None)  ΔAcc=-0.3770  ΔF1=-0.4930  ΔROC-AUC=-0.2523  ΔPR-AUC=-0.1177
 - HGVS.p only        (seed=None)  ΔAcc=-0.0200  ΔF1=-0.0136  ΔROC-AUC=-0.0558  ΔPR-AUC=-0.0244
+
+Old results: bug in the prompt handling so it leaked, does show most of the signal is in HGVS.p
+
+---
+Ablation summary [val]
+Mode                N      Acc       F1    ROC-AUC     PR-AUC
+------------------------------------------------------
+cond+prompt      2000   0.8650   0.8598     0.9523     0.9530
+cond_only        2000   0.5250   0.0613     0.7217     0.7357
+prompt_only      2000   0.8145   0.7782     0.9415     0.9416
+zero_dna         2000   0.8675   0.8638     0.9544     0.9552
+zero_go          2000   0.8645   0.8565     0.9516     0.9529
+zero_prot        2000   0.8315   0.8185     0.9383     0.9363
+
+Δ vs cond+prompt:
+- cond_only     ΔAcc=-0.3400  ΔF1=-0.7985  ΔROC-AUC=-0.2306  ΔPR-AUC=-0.2172
+- prompt_only   ΔAcc=-0.0505  ΔF1=-0.0816  ΔROC-AUC=-0.0108  ΔPR-AUC=-0.0113
+- zero_dna      ΔAcc=+0.0025  ΔF1=+0.0039  ΔROC-AUC=+0.0021  ΔPR-AUC=+0.0023
+- zero_go       ΔAcc=-0.0005  ΔF1=-0.0033  ΔROC-AUC=-0.0008  ΔPR-AUC=-0.0001
+- zero_prot     ΔAcc=-0.0335  ΔF1=-0.0413  ΔROC-AUC=-0.0141  ΔPR-AUC=-0.0167
+
+It never learned the conditioning. Which is what I expected.
