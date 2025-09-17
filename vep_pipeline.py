@@ -42,6 +42,8 @@ import pandas as pd
 from Bio import SeqIO
 from multiprocessing.pool import ThreadPool  # IO-bound (docker), threads are fine
 
+from src.pipeline.config import _norm_path
+
 
 # ---------------------------
 # Category classifier (HGVSp)
@@ -394,6 +396,9 @@ def run_vep_pipeline(
     Run the full VEP workflow in-process.
     Returns the path to vep_combined.parquet.
     """
+    input_path = _norm_path(input_path)
+    host_cache_dir = _norm_path(host_cache_dir)
+    out_dir = _norm_path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load DF (infer by suffix)
@@ -497,10 +502,10 @@ def main():
     args = ap.parse_args()
 
     run_vep_pipeline(
-        Path(args.input),
-        Path(args.host_cache_dir),
+        _norm_path(args.input),
+        _norm_path(args.host_cache_dir),
         args.fasta,
-        Path(args.out_dir),
+        _norm_path(args.out_dir),
         image=args.image,
         filter_mode=args.filter,
         chunk_size=args.chunk_size,

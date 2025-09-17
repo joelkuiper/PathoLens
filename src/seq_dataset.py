@@ -34,6 +34,8 @@ class SequenceTowerDataset(Dataset):
         protein_meta_feather: Optional[str] = None,
         protein_npz: Optional[str] = None,
         protein_eff_key: str = "prot_eff",
+        go_normalize: bool = True,
+        go_uppercase: bool = True,
     ):
         # --------- Report the inputs up front ---------
         print("\n[SequenceTowerDataset] constructing...")
@@ -99,14 +101,18 @@ class SequenceTowerDataset(Dataset):
 
         # ---- GO embeddings ----
         try:
-            self.go = GeneGOEmbeddings(go_npz, normalize=True, uppercase_keys=True)
+            self.go = GeneGOEmbeddings(
+                go_npz, normalize=go_normalize, uppercase_keys=go_uppercase
+            )
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load GO embeddings from '{go_npz}': {e}"
             ) from e
 
         self.D_eff = D_eff
+        self.dna_dim = D_eff
         self.D_go = int(self.go.dim)
+        self.go_dim = self.D_go
         print(
             f"[GO] dim={self.D_go}  entries={len(self.go.name2idx) if hasattr(self.go, 'name2idx') else 'unknown'}"
         )
@@ -120,9 +126,9 @@ class SequenceTowerDataset(Dataset):
         # quick GO hit-rate
         genes_series = self.meta.get("GeneSymbol", pd.Series([""] * n_rows))
         genes = genes_series.astype(str).str.upper().tolist()
-        self.go_hits = sum(g in getattr(self.go, "name2idx", {}) for g in genes) / max(
-            1, len(genes)
-        )
+        go_hits = sum(g in getattr(self.go, "name2idx", {}) for g in genes)
+        self.go_hits = go_hits / max(1, len(genes))
+        self.go_hit_rate = self.go_hits
         print(
             f"[GO] hit-rate: {self.go_hits:.3f} "
             f"(found {int(self.go_hits * len(genes))}/{len(genes)})"
@@ -130,7 +136,9 @@ class SequenceTowerDataset(Dataset):
 
         self.prot_eff = None
         self.D_prot = 0
+        self.protein_dim = 0
         self._prot_rows = None  # per-sample index into protein array, -1 if missing
+        self.protein_coverage = 0.0
 
         if protein_meta_feather is not None and protein_npz is not None:
             # Load protein meta
@@ -189,8 +197,10 @@ class SequenceTowerDataset(Dataset):
                     f"protein eff expected 2D array, got {self.prot_eff.ndim}D"
                 )
             self.D_prot = int(self.prot_eff.shape[1])
+            self.protein_dim = self.D_prot
 
             cov = int((self._prot_rows >= 0).sum())
+            self.protein_coverage = cov / max(1, len(self.meta))
             cov_pct = 100.0 * cov / max(1, len(self.meta))
             print(
                 f"[PROT] coverage: {cov}/{len(self.meta)} ({cov_pct:.1f}%)  "
@@ -202,9 +212,14 @@ class SequenceTowerDataset(Dataset):
         else:
             print("[PROT] not provided (skipping protein features)")
             self.D_prot = 0
+            self.protein_dim = 0
+            self.protein_coverage = 0.0
 
         # Final layout summary
         total_D = self.D_eff + self.D_go + (self.D_prot or 0)
+        self.protein_dim = self.D_prot or 0
+        self.dna_dim = self.D_eff
+        self.go_dim = self.D_go
         print(
             f"[SequenceTowerDataset] feature layout: "
             f"dna={self.D_eff}  go={self.D_go}  prot={self.D_prot}  total={total_D}\n"

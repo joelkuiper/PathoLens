@@ -414,7 +414,7 @@ def write_protein_meta(meta_df: pd.DataFrame, out_feather: str) -> None:
 
 
 # ============================================================
-# Orchestrator used by protein_utils_runner.build_protein_caches
+# Orchestrator used by pipeline builders
 # ============================================================
 
 
@@ -454,7 +454,9 @@ def process_and_cache_protein(
             npz = np.load(out_npz)
             if "prot_eff" in npz.files and npz["prot_eff"].shape[0] == len(kept):
                 need_embed = False
-                print(f"[cache] using protein embeddings: {out_npz}")
+                print(
+                    f"[protein][embeddings] reuse {out_npz} rows={len(kept)} force={force_embeddings}"
+                )
         except Exception:
             need_embed = True
 
@@ -508,9 +510,11 @@ def process_and_cache_protein(
         # Compute effect vectors and save
         eff = compute_effect_vectors(wt_emb, mt_emb)
         save_protein_arrays(out_npz, prot_eff=eff)
-        print(f"[cache] wrote protein embeddings: {out_npz} (N={N})")
+        print(
+            f"[protein][embeddings] wrote {out_npz} rows={N} uniques_wt={len(wt_row2uniq)}"
+        )
 
     # Always (re)write meta so it matches whatever we embedded
     write_protein_meta(kept, out_meta)
-    print(f"[meta] wrote protein meta: {out_meta} (N={len(kept)})")
+    print(f"[protein][meta] wrote {out_meta} rows={len(kept)}")
     return kept, out_npz

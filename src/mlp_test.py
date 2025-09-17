@@ -20,12 +20,19 @@ Relies on dataset attributes:
   ds.D_eff, ds.D_go, ds.D_prot (0 if protein was not provided)
 
 Usage:
-    from src.ablation_probe import run_ablation_probes, print_probe_table
-    results = run_ablation_probes(seq_ds, hpo_trials=0)
+    from src.mlp_test import run_ablation_probes, print_probe_table
+    from src.pipeline.datasets import load_manifest_datasets
+
+    cfg, manifest, datasets = load_manifest_datasets("configs/pipeline.local.toml")
+    results = run_ablation_probes(datasets)
     print_probe_table(results)
+
+See ``load_probe_datasets`` / ``run_probes_from_config`` below for convenience
+wrappers that accept the unified pipeline configuration + manifest.
 """
 
 from __future__ import annotations
+from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 import numpy as np
 import torch
@@ -43,6 +50,13 @@ from sklearn.metrics import (
     confusion_matrix,
     balanced_accuracy_score,
 )
+
+from src.pipeline import PipelineConfig, PipelineManifest
+from src.pipeline.datasets import load_manifest_datasets
+from src.seq_dataset import SequenceTowerDataset
+
+
+SequenceDatasetMap = Dict[str, SequenceTowerDataset]
 
 
 # --------------------------
@@ -142,7 +156,7 @@ class _MLP(nn.Module):
 # Core probe for one feature mode
 # --------------------------
 def _run_single_probe(
-    seq_ds: Dict[str, object],
+    seq_ds: SequenceDatasetMap,
     feat_mode: str,
     *,
     hidden=512,
@@ -349,7 +363,7 @@ def _run_single_probe(
 # Public runner
 # --------------------------
 def run_ablation_probes(
-    seq_ds: Dict[str, object],
+    seq_ds: SequenceDatasetMap,
     *,
     modes: Optional[List[str]] = None,
     hidden=512,
@@ -441,3 +455,46 @@ def print_probe_table(results: Dict[str, dict]) -> None:
                 f"{_fmt(rowbt['roc']):>6} {_fmt(rowbt['pr']):>6}"
             )
         print("-" * 80)
+
+
+def load_probe_datasets(
+    config_path: str | Path,
+    *,
+    manifest_path: Optional[str | Path] = None,
+    make_label: bool = True,
+    label_col: str = "_y",
+) -> Tuple[PipelineConfig, PipelineManifest, SequenceDatasetMap]:
+    """Load config + manifest and build datasets for the ablation probes."""
+
+    cfg, manifest, datasets = load_manifest_datasets(
+        config_path,
+        manifest_path=manifest_path,
+        make_label=make_label,
+        label_col=label_col,
+    )
+    return cfg, manifest, datasets
+
+
+def run_probes_from_config(
+    config_path: str | Path,
+    *,
+    manifest_path: Optional[str | Path] = None,
+    make_label: bool = True,
+    label_col: str = "_y",
+    **probe_kwargs,
+) -> Tuple[
+    PipelineConfig,
+    PipelineManifest,
+    SequenceDatasetMap,
+    Dict[str, dict],
+]:
+    """Convenience wrapper: load datasets and run the ablation probes."""
+
+    cfg, manifest, datasets = load_probe_datasets(
+        config_path,
+        manifest_path=manifest_path,
+        make_label=make_label,
+        label_col=label_col,
+    )
+    results = run_ablation_probes(datasets, **probe_kwargs)
+    return cfg, manifest, datasets, results

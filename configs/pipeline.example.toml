@@ -1,0 +1,81 @@
+# Example PathoLens pipeline configuration
+# Copy this file and edit values to configure the pipeline. The Python
+# dataclasses in src/pipeline/config.py just validate these settings at runtime.
+
+[Paths]
+# ClinVar variant_summary.txt(.gz)
+clinvar = "data/raw/variant_summary.txt.gz"
+# Reference FASTA (GRCh38)
+fasta = "data/raw/GCF_000001405.40_GRCh38.p14_genomic.fna"
+# Default GO embedding archive
+go = "data/processed/go_n2v_genes.npz"
+# Where all derived artifacts will be written
+artifacts = "artifacts"
+
+[DNA]
+model_id = "InstaDeepAI/nucleotide-transformer-500m-1000g"
+window = 512
+max_length = 512
+batch_size = 16
+pool = "mean"
+force_windows = false
+force_embeddings = false
+
+[Protein]
+enabled = true
+model_id = "facebook/esm2_t12_35M_UR50D"
+batch_size = 8
+max_length = 2048
+pool = "mean"
+vep_cache_dir = "~/vep_cache"
+vep_fasta_relpath = "homo_sapiens/115_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
+image = "ensemblorg/ensembl-vep"
+filter_mode = "protein_changing"
+chunk_size = 1000
+jobs = 6
+vep_fork = 0
+force_embeddings = false
+force_vep = false
+
+[GO]
+# Override to use a different embedding archive
+npz = "data/processed/go_n2v_genes.npz"
+normalize = true
+uppercase_keys = true
+
+[Train]
+# Placeholder for downstream training choices
+epochs = 1
+batch_size = 64
+lr = 0.0003
+
+[LLM]
+enabled = true
+out_dir = "artifacts/qwen3"
+model_id = "Qwen/Qwen3-4B-Instruct-2507"
+epochs = 1
+max_len = 256
+per_device_bs = 16
+grad_accum = 8
+lr = 0.0003
+seed = 42
+num_workers = 0
+prefetch_factor = 2
+persistent_workers = false
+pin_memory = true
+group_by_length = false
+drop_last = true
+balanced_sampling = true
+n_cond_tokens = 8
+prompt_dropout_prob = 0.3
+
+[Run]
+# Location for the manifest JSON that summarises caches
+manifest = "artifacts/pipeline_manifest.json"
+write_manifest = true
+force_splits = false
+force_dna_windows = false
+force_dna_embeddings = false
+force_protein_embeddings = false
+# Optional global device override; "auto" uses util.get_device()
+device = "auto"

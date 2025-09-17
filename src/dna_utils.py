@@ -261,7 +261,9 @@ def process_and_cache_dna(
         )
     if os.path.exists(windows_meta) and not force_windows:
         kept_df, ref_seqs, alt_seqs, _, _ = load_windows_feather(windows_meta, window)
-        print(f"[cache] loaded windows: {windows_meta} (n={len(kept_df)})")
+        print(
+            f"[dna][windows] reuse {windows_meta} rows={len(kept_df)} force={force_windows}"
+        )
     else:
         kept_df, ref_seqs, alt_seqs = collect_variant_windows(df, fasta, window=window)
         fasta_path = getattr(fasta, "filename", "") or ""
@@ -273,7 +275,7 @@ def process_and_cache_dna(
             window=window,
             fasta_path=fasta_path,
         )
-        print(f"[cache] wrote windows: {windows_meta} (n={len(kept_df)})")
+        print(f"[dna][windows] wrote {windows_meta} rows={len(kept_df)}")
     if len(kept_df) == 0:
         raise RuntimeError("No valid variants after window collection.")
 
@@ -286,7 +288,9 @@ def process_and_cache_dna(
         else:
             need_embed = True
         if not need_embed:
-            print(f"[cache] using embeddings: {out_npz}")
+            print(
+                f"[dna][embeddings] reuse {out_npz} rows={len(kept_df)} force={force_embeddings}"
+            )
 
     if need_embed:
         tok, enc, device = build_dna_encoder(dna_model_id, max_length, device)
@@ -312,7 +316,7 @@ def process_and_cache_dna(
         )
         eff_embs = compute_effect_vectors(ref_embs, alt_embs)
         save_dna_arrays(out_npz, ref_embs, alt_embs, eff_embs)
-        print(f"[cache] wrote embeddings: {out_npz} (N={len(kept_df)})")
+        print(f"[dna][embeddings] wrote {out_npz} rows={len(kept_df)}")
 
     # C) final meta aligned to arrays
     npz = np.load(out_npz)
@@ -326,5 +330,5 @@ def process_and_cache_dna(
     kept_df = kept_df.copy()
     kept_df["emb_row"] = np.arange(N, dtype=np.int32)
     write_variant_meta_feather(kept_df, out_meta)
-    print(f"[meta] wrote: {out_meta} (N={N})")
+    print(f"[dna][meta] wrote {out_meta} rows={N}")
     return kept_df, out_npz

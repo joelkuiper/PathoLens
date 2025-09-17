@@ -105,7 +105,31 @@ uv pip install '.[cuda]'
 source .venv/bin/activate
 ```
 
+### Pipeline configuration
+
+All pipeline stages are now configured via a single TOML file. An annotated example is
+available at [`configs/pipeline.example.toml`](./configs/pipeline.example.toml). Copy it
+to a new location (e.g. `configs/pipeline.local.toml`) and update the paths to match your
+environment:
+
+- `[Paths]` points at the ClinVar TSV, GRCh38 FASTA, GO embeddings archive, and the
+  destination artifacts directory.
+- `[DNA]` controls nucleotide-transformer windowing/encoding and cache overwrite flags.
+- `[Protein]` enables the optional VEP → ESM2 pathway and includes Docker/cache settings.
+- `[GO]` toggles GO embedding normalisation.
+- `[Train]` reserves knobs for classical ML experiments (unused in the current pipeline).
+- `[LLM]` configures the Qwen LoRA fine-tune.
+- `[Run]` controls manifest writing and global overrides (e.g. forcing split regeneration).
+
+Relative paths are resolved relative to the config file, and `~` is expanded everywhere.
+
+> ℹ️ The Python dataclasses in [`src/pipeline/config.py`](./src/pipeline/config.py)
+> simply mirror this schema for validation. Copy and edit the TOML file to tweak
+> behaviour; the dataclass defaults only serve as fallbacks when a key is
+> omitted.
+
 ### Training & Evaluation
+
 Next generate the GO node2vec embeddings:
 
 ``` bash
@@ -130,11 +154,42 @@ Depending on your machine and configuration one of them should work, unfortunate
 uv pip install pyg-lib -f https://data.pyg.org/whl/torch-2.8.0+cu129.html
 ```
 
-Then generate the intermediate data and run the LLM fine-tune, which also calls the full evaluation.
+Then build the caches and (optionally) run the LLM fine-tune using the unified pipeline
+config:
 
 ``` bash
-python train.py
+python train.py --config configs/pipeline.local.toml
 
 ```
-The actual fine-tune takes about 6 hours on an Nvidia RTX 4090, however preparing the data and evaluating adds considerable overhead.
-In total the runtime was about 12 hours, end to end.
+
+Use `--device` to override the auto-detected accelerator (`cpu`, `cuda:0`, …) and
+`--skip-train` to stop after cache + manifest creation. When enabled, a manifest JSON is
+written to `Run.manifest` (defaults to `artifacts/pipeline_manifest.json`) describing all
+derived artifacts. For a quick interactive look at the cached datasets, drop into
+IPython and paste:
+
+```python
+from src.pipeline.datasets import load_manifest_datasets
+
+cfg, manifest, datasets = load_manifest_datasets("configs/pipeline.local.toml")
+train_ds = datasets["train"]
+```
+
+`load_manifest_datasets` uses the manifest location from the TOML by default, and
+returns the parsed config alongside the manifest/dataset objects for further
+inspection.
+
+To reproduce the classical MLP ablation probe, load the datasets as above and run:
+
+```python
+from src.mlp_test import run_ablation_probes, print_probe_table
+
+results = run_ablation_probes(datasets)
+print_probe_table(results)
+```
+
+`src/mlp_test.py` also exposes `run_probes_from_config` which bundles the config
+load, dataset construction, and probe execution in a single call.
+
+The full fine-tune on a RTX 4090 takes roughly 6 hours; building caches and running
+evaluation roughly doubles the wall-clock time.
