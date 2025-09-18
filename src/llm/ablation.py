@@ -24,12 +24,8 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Dict, Any, Optional, Tuple, List
 
-from tqdm import tqdm
 
 from src.llm.eval import evaluate_split_batched
-from src.clinvar import (
-    pick_gene,
-)  # noqa: F401 (kept for potential future prompt tweaks)
 
 # ----------------------------
 # Prompt-source columns used by your prompt builder

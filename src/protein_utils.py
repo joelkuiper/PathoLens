@@ -1,6 +1,6 @@
 # src/protein_utils.py
 from __future__ import annotations
-from typing import Iterable, Tuple, Optional, List, Dict
+from typing import Tuple, Optional, List, Dict
 import os
 import numpy as np
 import pandas as pd

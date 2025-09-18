@@ -229,7 +229,8 @@ def optimize_go_for_seqds(
     max_train_probe: Optional[int] = 80000,
     max_val_probe: Optional[int] = 20000,
 ) -> Dict[str, Any]:
-    import torch, random
+    import torch
+    import random
 
     rng = np.random.default_rng(seed)
     if torch.cuda.is_available():

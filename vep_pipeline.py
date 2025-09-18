@@ -35,9 +35,13 @@ Example:
       --vep_fork 2
 """
 
-import argparse, os, sys, json, re, shutil, subprocess, tempfile
+import argparse
+import os
+import json
+import re
+import subprocess
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Tuple, Optional
 import pandas as pd
 from Bio import SeqIO
 from multiprocessing.pool import ThreadPool  # IO-bound (docker), threads are fine
@@ -451,7 +455,6 @@ def run_vep_pipeline(
             (idx, cdf, work_dir, host_cache_dir, fasta_relpath, image, vep_fork)
         )
 
-    from multiprocessing.pool import ThreadPool
 
     with ThreadPool(processes=jobs) as pool:
         dfs = list(pool.imap_unordered(run_chunk, job_args))
@@ -471,7 +474,6 @@ def run_vep_pipeline(
 
 
 def main():
-    import argparse
 
     ap = argparse.ArgumentParser(
         description="Run VEP-in-Docker on a ClinVar-like DataFrame"

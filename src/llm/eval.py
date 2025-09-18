@@ -6,7 +6,8 @@
 # - Rationales are generated AFTER predicting the label, and are conditioned on the PREDICTED label only.
 # - LoRA + conditioning projector remain active for both scoring and rationale generation.
 
-import os, re
+import os
+import re
 import numpy as np
 import torch
 from typing import List, Dict, Any, Optional
@@ -363,8 +364,6 @@ def evaluate_split_batched(
     IMPORTANT: We do NOT insert ground-truth anywhere into the prompt or scoring.
     """
     from sklearn.metrics import (
-        accuracy_score,
-        precision_recall_fscore_support,
         confusion_matrix,
         classification_report,
         roc_auc_score,
@@ -503,12 +502,6 @@ def evaluate_split_batched(
     acc = float(np.mean(np.array(y_pred) == np.array(y_true))) if y_true else 0.0
     p, r, f1 = torchmetrics_safe_prf(y_true, y_pred)
 
-    from sklearn.metrics import (
-        confusion_matrix,
-        classification_report,
-        roc_auc_score,
-        average_precision_score,
-    )
 
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
     report = classification_report(

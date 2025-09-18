@@ -3,9 +3,8 @@ from __future__ import annotations
 from typing import Dict, Any, List
 import numpy as np
 import torch
-from .config import CHAT_SYSTEM, BIN_LABELS
+from .config import CHAT_SYSTEM
 from .chat import sanitize_model_text
-from .modeling import enable_fast_generate
 
 
 @torch.inference_mode()
@@ -241,71 +240,4 @@ def generate_label_then_rationale(
         "logprobs": label_out["logprobs"],
         "rationale": rationale,
         "raw_rationale": rationale_raw,
-    }
-
-
-# ---- Quick evaluation (uses scoring path; no JSON) ----
-def quick_eval_pathogenicity_binary(
-    model, tokenizer, val_seq_ds, n: int = 512, seed: int = 0
-) -> Dict[str, Any]:
-    from sklearn.metrics import (
-        accuracy_score,
-        precision_recall_fscore_support,
-        confusion_matrix,
-        classification_report,
-    )
-
-    rng = np.random.default_rng(seed)
-    idxs = rng.choice(
-        len(val_seq_ds), size=min(n, len(val_seq_ds)), replace=False
-    ).tolist()
-    enable_fast_generate(model, tokenizer)
-
-    def _true_label_from_meta(row) -> int | None:
-        y = row.get("_y", None)
-        try:
-            return int(y) if y is not None else None
-        except Exception:
-            return None
-
-    y_true, y_pred, examples = [], [], []
-    for i in idxs:
-        x, _, _ = val_seq_ds[i]
-        cond = x.numpy()
-        row = val_seq_ds.meta.iloc[i]
-        y = _true_label_from_meta(row)
-        if y is None:
-            continue
-        ctx = row.get("context", "")
-        prompt = f"Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
-        out = predict_label_with_probs(model, tokenizer, prompt, cond)
-        cls = out["label"]
-        yhat = 1 if cls == "Pathogenic" else 0
-        y_true.append(int(y))
-        y_pred.append(int(yhat))
-        if len(examples) < 8:
-            examples.append(
-                {"idx": i, "truth": int(y), "pred": int(yhat), "probs": out["probs"]}
-            )
-
-    if not y_true:
-        return {"n": 0, "note": "No labeled samples in val meta."}
-
-    acc = accuracy_score(y_true, y_pred)
-    p, r, f1, _ = precision_recall_fscore_support(
-        y_true, y_pred, average="binary", zero_division=0
-    )
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
-    report = classification_report(
-        y_true, y_pred, labels=[0, 1], target_names=BIN_LABELS, digits=3
-    )
-    return {
-        "n": len(y_true),
-        "accuracy": float(acc),
-        "precision": float(p),
-        "recall": float(r),
-        "f1": float(f1),
-        "confusion_matrix": cm,
-        "report": report,
-        "samples": examples,
     }

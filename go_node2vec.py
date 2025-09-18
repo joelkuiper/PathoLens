@@ -20,10 +20,8 @@ import argparse
 import gzip
 import json
 import re
-import sys
-import gc
 import multiprocessing
-from typing import List, Tuple, Optional, Set, Dict
+from typing import List, Tuple, Optional, Set
 
 import networkx as nx
 import numpy as np
