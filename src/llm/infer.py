@@ -24,7 +24,7 @@ def _build_prompt_inputs_embeds(
     cond = cond_vec_np.astype("float32")
     cond /= np.linalg.norm(cond) + 1e-6
     cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb.dtype)
-    cond_emb = model.cond_projector(cond)
+    cond_emb, _ = model.cond_projector(cond)
     inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
     attn = enc["attention_mask"]
     K = cond_emb.size(1)
@@ -197,7 +197,7 @@ def generate_label_then_rationale(
     cond = cond_vec_np.astype("float32")
     cond /= np.linalg.norm(cond) + 1e-6
     cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb.dtype)  # [1, D]
-    cond_emb = model.cond_projector(cond)  # [1, K, H]
+    cond_emb, _ = model.cond_projector(cond)  # [1, K, H]
 
     inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
     attn = enc["attention_mask"]

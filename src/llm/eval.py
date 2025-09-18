@@ -190,7 +190,7 @@ def _prep_inputs_embeds(
     cond = cond_vecs.astype("float32")
     cond = cond / (np.linalg.norm(cond, axis=1, keepdims=True) + 1e-6)
     cond = torch.from_numpy(cond).to(dev, dtype=txt_emb.dtype)  # [B,D]
-    cond_emb = model.cond_projector(cond)  # [B,K,H]
+    cond_emb, _ = model.cond_projector(cond)  # [B,K,H]
 
     inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
     attn = enc["attention_mask"]
@@ -293,7 +293,7 @@ def _generate_rationale_with_seed(
     v = cond_vec.astype("float32")
     v /= np.linalg.norm(v) + 1e-6
     v = torch.from_numpy(v).unsqueeze(0).to(dev, dtype=txt_emb.dtype)  # [1,D]
-    cond_emb = model.cond_projector(v)  # [1,K,H]
+    cond_emb, _ = model.cond_projector(v)  # [1,K,H]
 
     # Assistant prefix seed (e.g., " Because")
     seed_ids = tok.encode(seed_text, add_special_tokens=False)

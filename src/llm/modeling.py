@@ -13,7 +13,7 @@ class CondProjector(nn.Module):
     into k learnable "conditioning tokens" in the model's hidden space.
     """
 
-    def __init__(self, d_in: int, d_out: int, k: int = 8):
+    def __init__(self, d_in: int, d_out: int, k: int = 8, n_classes: int = 2):
         super().__init__()
         self.k = k
         # simple one-layer projector with GELU nonlinearity
@@ -21,14 +21,17 @@ class CondProjector(nn.Module):
             nn.Linear(d_in, d_out * k, bias=True),
             nn.GELU(),
         )
+        self.aux_head = nn.Linear(d_out * k, n_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         """
-        x: [B, d_in] -> returns [B, k, d_out]
+        x: [B, d_in] -> returns ([B, k, d_out], [B, n_classes])
         """
         B = x.size(0)
         y = self.net(x)
-        return y.view(B, self.k, -1)
+        cond_tokens = y.view(B, self.k, -1)
+        aux_logits = self.aux_head(y)
+        return cond_tokens, aux_logits
 
 
 def build_qwen_with_lora(cfg, D_cond: int):
