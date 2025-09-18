@@ -52,7 +52,7 @@ lr = 0.0003
 
 [LLM]
 enabled = true
-out_dir = "artifacts/qwen3"
+out_dir = "../artifacts/qwen3"
 model_id = "Qwen/Qwen3-4B-Instruct-2507"
 epochs = 1
 max_len = 256
@@ -72,7 +72,7 @@ prompt_dropout_prob = 0.3
 
 [Run]
 # Location for the manifest JSON that summarises caches
-manifest = "artifacts/pipeline_manifest.json"
+manifest = "../artifacts/pipeline_manifest.json"
 write_manifest = true
 force_splits = false
 force_dna_windows = false

@@ -316,55 +316,6 @@ def run_prompt_vs_cond_ablation(
     )
     results["prompt_only"] = out
 
-    # --- (4) zero_dna (selectively zero DNA slice) ---
-    print("\n[ABL] zero_dna (conditioning present; DNA slice zeroed)")
-    view_zero_dna = _with_cond_selective(seq_ds, [dna_slice])
-    if debug_masking:
-        _debug_check_masking(seq_ds[split], [dna_slice], tag="zero_dna", n=3)
-    out = evaluate_split_batched(
-        view_zero_dna,
-        out_dir=out_dir,
-        split=split,
-        max_n=max_n,
-        batch_size=batch_size,
-        sample_rationales=0,
-    )
-    results["zero_dna"] = out
-
-    # --- (5) zero_go (selectively zero GO slice) ---
-    print("\n[ABL] zero_go (conditioning present; GO slice zeroed)")
-    view_zero_go = _with_cond_selective(seq_ds, [go_slice])
-    if debug_masking:
-        _debug_check_masking(seq_ds[split], [go_slice], tag="zero_go", n=3)
-    out = evaluate_split_batched(
-        view_zero_go,
-        out_dir=out_dir,
-        split=split,
-        max_n=max_n,
-        batch_size=batch_size,
-        sample_rationales=0,
-    )
-    results["zero_go"] = out
-
-    # --- (6) zero_prot (selectively zero Prot slice, if present) ---
-    has_prot = (prot_slice[1] - prot_slice[0]) > 0
-    if has_prot:
-        print("\n[ABL] zero_prot (conditioning present; Protein slice zeroed)")
-        view_zero_prot = _with_cond_selective(seq_ds, [prot_slice])
-        if debug_masking:
-            _debug_check_masking(seq_ds[split], [prot_slice], tag="zero_prot", n=3)
-        out = evaluate_split_batched(
-            view_zero_prot,
-            out_dir=out_dir,
-            split=split,
-            max_n=max_n,
-            batch_size=batch_size,
-            sample_rationales=0,
-        )
-        results["zero_prot"] = out
-    else:
-        print("\n[ABL] zero_prot skipped (no protein features present)")
-
     # --- Pretty print ---
     def _get(res, k):
         try:
@@ -375,9 +326,9 @@ def run_prompt_vs_cond_ablation(
     print(f"\nAblation summary [{split}]")
     print(f"{'Mode':14} {'N':>6} {'Acc':>8} {'F1':>8} {'ROC-AUC':>10} {'PR-AUC':>10}")
     print("-" * 54)
-    ordered = ["cond+prompt", "cond_only", "prompt_only", "zero_dna", "zero_go"]
-    if has_prot:
-        ordered.append("zero_prot")
+    ordered = ["cond+prompt", "cond_only", "prompt_only"]
+    # if has_prot:
+    #     ordered.append("zero_prot")
     for name in ordered:
         r = results[name]
         print(
