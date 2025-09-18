@@ -29,18 +29,24 @@ def _norm_path(value: Any, base: Optional[Path] = None) -> Path:
     """Return a normalised Path with user/env/relative handling."""
 
     if isinstance(value, Path):
-        p = value
+        raw_path = value
     else:
         if value is None:
             raise ConfigError("Path value cannot be None")
-        p = Path(os.path.expandvars(str(value)))
-    if base is not None and not p.is_absolute():
-        p = Path(base) / p
-    p = Path(os.path.expandvars(str(p))).expanduser()
+        raw_path = Path(str(value))
+
+    expanded = Path(os.path.expandvars(str(raw_path))).expanduser()
+    if base is not None and not expanded.is_absolute():
+        expanded = Path(base) / expanded
+
+    # ``Path.resolve`` will resolve symlinks and ``..`` components, but raises if
+    # the path does not yet exist (common for output directories). Fall back to a
+    # simple absolute path in that situation so we still return a usable Path
+    # instance without forcing the caller to pre-create directories.
     try:
-        return p.resolve()
+        return expanded.resolve()
     except FileNotFoundError:  # allow non-existent outputs
-        return p.expanduser().absolute()
+        return expanded.absolute()
 
 
 @dataclass
