@@ -79,7 +79,9 @@ class CondTrainer(Trainer):
         txt_emb = tok_emb(input_ids)
         cond_vec = cond_vec.to(device=txt_emb.device, dtype=txt_emb.dtype)
 
-        # Projector now returns: cond tokens, aux logits
+        # cond_vec = cond_vec / (cond_vec.norm(dim=-1, keepdim=True) + 1e-6)
+
+        # Projector returns: cond tokens, aux logits
         cond_emb, aux_logits = model.cond_projector(cond_vec)  # (B, K, H), (B, 2)
 
         # ===== PROMPT DROPOUT =====

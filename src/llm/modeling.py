@@ -9,28 +9,31 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 class CondProjector(nn.Module):
     """
-    Projects a conditioning vector (e.g., concatenated dna/prot/go features)
-    into k learnable "conditioning tokens" in the model's hidden space.
+    Map conditioning vector -> k virtual tokens in hidden space
+    and an auxiliary classification head.
     """
 
-    def __init__(self, d_in: int, d_out: int, k: int = 8, n_classes: int = 2):
+    def __init__(
+        self, d_in: int, d_out: int, k: int = 8, n_classes: int = 2, p_drop: float = 0.1
+    ):
         super().__init__()
         self.k = k
-        # simple one-layer projector with GELU nonlinearity
-        self.net = nn.Sequential(
-            nn.Linear(d_in, d_out * k, bias=True),
+        self.norm = nn.LayerNorm(d_in)
+        self.fc = nn.Sequential(
+            nn.Linear(d_in, d_out * k),
             nn.GELU(),
+            nn.Dropout(p_drop),
+            nn.Linear(d_out * k, d_out * k),
         )
         self.aux_head = nn.Linear(d_out * k, n_classes)
+        self.gain = nn.Parameter(torch.ones(1))
 
     def forward(self, x: torch.Tensor):
-        """
-        x: [B, d_in] -> returns ([B, k, d_out], [B, n_classes])
-        """
-        B = x.size(0)
-        y = self.net(x)
-        cond_tokens = y.view(B, self.k, -1)
-        aux_logits = self.aux_head(y)
+        # x: [B, d_in]
+        x = self.norm(x)
+        y = self.fc(x)  # [B, k*d_out]
+        cond_tokens = self.gain * y.view(x.size(0), self.k, -1)
+        aux_logits = self.aux_head(y)  # [B, n_classes]
         return cond_tokens, aux_logits
 
 

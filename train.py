@@ -70,7 +70,9 @@ def main() -> None:
         extras={"config": str(Path(args.config).resolve())},
     )
     if cfg.run.write_manifest:
-        manifest_path = cfg.run.manifest_path or (cfg.paths.artifacts / "pipeline_manifest.json")
+        manifest_path = cfg.run.manifest_path or (
+            cfg.paths.artifacts / "pipeline_manifest.json"
+        )
         manifest.dump(manifest_path)
     else:
         print("[manifest] skipping write (Run.write_manifest=false)")
@@ -91,8 +93,21 @@ def main() -> None:
     out_dir = llm_cfg.out_dir
     print(f"[llm] output dir: {out_dir}")
     run_llm_pipeline(llm_cfg, seq_datasets)
-    llm_eval.run_all(seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id)
     print("[done] training complete")
+
+    print("[llm] running evaluation")
+    llm_eval.run_all(seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id)
+
+    print("[llm] running ablation test")
+    import src.llm.ablation as ablation
+
+    ablation.run_prompt_vs_cond_ablation(
+        seq_datasets,
+        out_dir=str(out_dir),
+        split="val",
+        max_n=5_000,
+        batch_size=128,
+    )
 
 
 if __name__ == "__main__":
