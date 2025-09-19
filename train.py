@@ -54,14 +54,21 @@ def main() -> None:
 
     # ----- ClinVar splits + VEP annotations -----
     splits, split_paths = prepare_clinvar_splits(cfg)
-    splits, vep_paths = ensure_vep_annotations(cfg, splits, split_paths)
+    splits, vep_paths, vep_tables = ensure_vep_annotations(
+        cfg, splits, split_paths, return_tables=True
+    )
 
     # ----- DNA caches -----
     dna_artifacts = build_dna_caches(cfg, splits, device)
 
     # ----- Protein caches -----
     protein_artifacts = build_protein_caches(
-        cfg, splits, device, split_paths=split_paths, vep_paths=vep_paths
+        cfg,
+        splits,
+        device,
+        split_paths=split_paths,
+        vep_paths=vep_paths,
+        vep_tables=vep_tables,
     )
 
     # ----- Manifest -----

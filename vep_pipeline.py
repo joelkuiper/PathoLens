@@ -573,8 +573,16 @@ def ensure_vep_annotations(
     cfg: PipelineConfig,
     splits: SplitDict,
     split_paths: PathDict,
-) -> Tuple[SplitDict, Dict[str, Path]]:
-    """Run VEP per split (with caching) and merge annotations back into splits."""
+    *,
+    return_tables: bool = False,
+) -> Tuple[SplitDict, PathDict] | Tuple[SplitDict, PathDict, Dict[str, pd.DataFrame]]:
+    """Run VEP per split (with caching) and merge annotations back into splits.
+
+    When ``return_tables`` is ``True`` the third element in the returned tuple
+    contains the raw combined VEP tables keyed by split name. Callers that only
+    expect two return values can omit the flag and retain the previous
+    (splits, vep_outputs) behavior.
+    """
 
     protein_cfg = cfg.protein
     cache_dir = protein_cfg.vep_cache_dir
@@ -590,6 +598,7 @@ def ensure_vep_annotations(
 
     updated: SplitDict = {}
     vep_outputs: Dict[str, Path] = {}
+    vep_tables: Dict[str, pd.DataFrame] = {}
 
     desired_cols = [
         "VariationID",
@@ -705,8 +714,12 @@ def ensure_vep_annotations(
         ann_cols = [c for c in desired_cols if c in vep_df.columns]
         ann = vep_df[ann_cols].drop_duplicates(subset=["VariationID"]).copy()
         ann["_vid_str"] = ann["VariationID"].astype(str)
+        merge_cols = [c for c in ann.columns if c not in {"VariationID", "_vid_str"}]
 
         merged = df.copy()
+        drop_cols = [c for c in merge_cols if c in merged.columns]
+        if drop_cols:
+            merged = merged.drop(columns=drop_cols)
         merged["_vid_str"] = merged["VariationID"].astype(str)
         merged = merged.merge(ann.drop(columns=["VariationID"]), on="_vid_str", how="left")
         merged = merged.drop(columns=["_vid_str"])
@@ -722,7 +735,10 @@ def ensure_vep_annotations(
         merged = merged.reset_index(drop=True)
         merged.to_feather(inp_path)
         updated[split] = merged
+        vep_tables[split] = vep_df
 
+    if return_tables:
+        return updated, vep_outputs, vep_tables
     return updated, vep_outputs
 
 

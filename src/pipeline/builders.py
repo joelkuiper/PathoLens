@@ -72,6 +72,7 @@ def build_protein_caches(
     *,
     split_paths: Optional[Dict[str, Path]] = None,
     vep_paths: Optional[Dict[str, Path]] = None,
+    vep_tables: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> Dict[str, SplitArtifact]:
     if not cfg.protein.enabled:
         print("[protein] disabled in config; skipping protein caches")
@@ -130,8 +131,14 @@ def build_protein_caches(
 
         meta_path = protein_dir / f"protein_{split}.feather"
         npz_path = protein_dir / f"protein_{split}_eff_fp16.npz"
+        preloaded = vep_tables.get(split) if vep_tables else None
+        if preloaded is not None:
+            print(
+                f"[protein] using cached VEP dataframe for {split}: rows={len(preloaded)}"
+            )
+
         kept_df, _ = process_and_cache_protein(
-            combined_feather,
+            preloaded if preloaded is not None else combined_feather,
             out_meta=str(meta_path),
             out_npz=str(npz_path),
             device=device,

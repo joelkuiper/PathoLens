@@ -325,8 +325,11 @@ def embed_unique_to_memmap(
 # ============================================================
 
 
-def _read_any_table(path: str | Path) -> pd.DataFrame:
-    p = Path(path)
+def _read_any_table(path_or_df: str | Path | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(path_or_df, pd.DataFrame):
+        return path_or_df.copy()
+
+    p = Path(path_or_df)
     suf = p.suffix.lower()
     if suf in {".feather", ".ft"}:
         return pd.read_feather(p)
@@ -338,7 +341,7 @@ def _read_any_table(path: str | Path) -> pd.DataFrame:
     return pd.read_table(p)
 
 
-def load_vep_sequences(vep_combined_path: str | Path) -> pd.DataFrame:
+def load_vep_sequences(vep_combined: str | Path | pd.DataFrame) -> pd.DataFrame:
     """
     Expect columns (from your VEP join):
       id (VariationID as str), protein_id, hgvsp, consequence_terms, seq_wt, seq_mt
@@ -346,7 +349,7 @@ def load_vep_sequences(vep_combined_path: str | Path) -> pd.DataFrame:
     - Keeps only rows with both WT/MT present
     - De-duplicates per (id, protein_id, hgvsp)
     """
-    df = _read_any_table(vep_combined_path)
+    df = _read_any_table(vep_combined)
 
     # normalize id
     if "id" not in df.columns and "VariationID" in df.columns:
@@ -419,7 +422,7 @@ def write_protein_meta(meta_df: pd.DataFrame, out_feather: str) -> None:
 
 
 def process_and_cache_protein(
-    vep_combined_path: str | Path,
+    vep_combined: str | Path | pd.DataFrame,
     *,
     out_meta: str,
     out_npz: str,
@@ -441,7 +444,7 @@ def process_and_cache_protein(
     os.makedirs(os.path.dirname(out_meta), exist_ok=True)
 
     # Load and keep usable rows
-    pairs = load_vep_sequences(vep_combined_path)
+    pairs = load_vep_sequences(vep_combined)
     if len(pairs) == 0:
         raise RuntimeError("No WT/MT sequences found in VEP combined file.")
     kept = pairs.reset_index(drop=True).copy()
