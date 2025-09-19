@@ -8,11 +8,12 @@ import torch
 from torch.utils.data import Dataset
 from .config import PROMPT_TMPL
 from .chat import build_chat_strings
+from .context import build_ctx_from_row
 
 
 def row_to_example(meta_row) -> Tuple[str, str]:
     """Training target is just the label: 'Benign' or 'Pathogenic'."""
-    ctx = meta_row.get("context", "") or ""
+    ctx = build_ctx_from_row(meta_row)
     prompt = PROMPT_TMPL.format(ctx=ctx)
     y = int(meta_row.get("_y"))
     cls = "Pathogenic" if y == 1 else "Benign"

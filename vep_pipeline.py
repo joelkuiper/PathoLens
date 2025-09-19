@@ -14,7 +14,7 @@ It will:
   * write chunk VCFs
   * run VEP in Docker (JSON + ProteinSeqs FASTAs)
   * parse & join JSON+FASTA into one tidy DataFrame
-  * write combined Feather/Parquet
+  * write combined Feather
 
 Requirements on the host:
   * Docker available
@@ -46,7 +46,11 @@ import pandas as pd
 from Bio import SeqIO
 from multiprocessing.pool import ThreadPool  # IO-bound (docker), threads are fine
 
-from src.pipeline.config import _norm_path
+from src.pipeline.config import _norm_path, PipelineConfig, ConfigError
+
+
+SplitDict = Dict[str, pd.DataFrame]
+PathDict = Dict[str, Path]
 
 
 # ---------------------------
@@ -144,6 +148,22 @@ def only_pdot(h: Optional[str]) -> Optional[str]:
         return None
     m = re.search(r"(p\.[^ \t|]+)", str(h))
     return m.group(1) if m else None
+
+
+def _strip_hgvs_prefix(value: Optional[str]) -> Optional[str]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    s = str(value)
+    return s.split(":", 1)[1] if ":" in s else s
+
+
+def _join_terms(values: Optional[list]) -> Optional[str]:
+    if not isinstance(values, (list, tuple)):
+        if values is None or values == "" or pd.isna(values):
+            return None
+        return str(values)
+    cleaned = [str(v) for v in values if v not in (None, "") and not pd.isna(v)]
+    return ",".join(cleaned) if cleaned else None
 
 
 def parse_fasta_indexed(path: Path) -> Dict[str, str]:
@@ -317,24 +337,54 @@ def parse_vep_json(json_path: Path) -> pd.DataFrame:
         for line in f:
             rec = json.loads(line)
             vid = rec.get("id")
+            base = {
+                "id": str(vid),
+                "most_severe_consequence": rec.get("most_severe_consequence"),
+                "assembly_name": rec.get("assembly_name"),
+                "allele_string": rec.get("allele_string"),
+            }
+
             tlist = rec.get("transcript_consequences") or []
             # with --pick there should be a single chosen transcript; still loop defensively
-            for t in tlist[:1]:
-                rows.append(
+            if tlist:
+                t = tlist[0]
+                row = dict(base)
+                row.update(
                     {
-                        "id": str(vid),
-                        "gene": t.get("gene_symbol"),
-                        "protein_id": t.get("protein_id"),
+                        "gene_symbol": t.get("gene_symbol"),
+                        "gene_symbol_source": t.get("gene_symbol_source"),
+                        "gene_id": t.get("gene_id"),
+                        "hgnc_id": t.get("hgnc_id"),
                         "transcript_id": t.get("transcript_id"),
-                        "consequence_terms": ",".join(t.get("consequence_terms", [])),
-                        "hgvsc": t.get("hgvsc"),
-                        "hgvsp": t.get("hgvsp"),
                         "mane_select": t.get("mane_select"),
+                        "mane_plus_clinical": t.get("mane_plus_clinical"),
                         "canonical": t.get("canonical"),
+                        "strand": t.get("strand"),
+                        "variant_allele": t.get("variant_allele"),
+                        "impact": t.get("impact"),
+                        "consequence_terms": _join_terms(t.get("consequence_terms")),
+                        "hgvsc": _strip_hgvs_prefix(t.get("hgvsc")),
+                        "hgvsp": _strip_hgvs_prefix(t.get("hgvsp")),
+                        "amino_acids": t.get("amino_acids"),
+                        "codons": t.get("codons"),
+                        "protein_id": t.get("protein_id"),
+                        "protein_start": t.get("protein_start"),
+                        "protein_end": t.get("protein_end"),
+                        "protein_id_source": t.get("protein_id_source"),
+                        "protein_length": t.get("protein_length"),
+                        "protein_id_version": t.get("protein_id_version"),
+                        "swissprot": _join_terms(t.get("swissprot")),
+                        "uniprot_isoform": _join_terms(t.get("uniprot_isoform")),
+                        "uniparc": _join_terms(t.get("uniparc")),
+                        "cdna_start": t.get("cdna_start"),
+                        "cdna_end": t.get("cdna_end"),
+                        "cds_start": t.get("cds_start"),
+                        "cds_end": t.get("cds_end"),
                     }
                 )
-            if not tlist:  # keep record for alignment
-                rows.append({"id": str(vid)})
+                rows.append(row)
+            else:  # keep record for alignment
+                rows.append(base)
     return pd.DataFrame(rows)
 
 
@@ -398,7 +448,7 @@ def run_vep_pipeline(
 ) -> Path:
     """
     Run the full VEP workflow in-process.
-    Returns the path to vep_combined.parquet.
+    Returns the path to vep_combined.feather.
     """
     input_path = _norm_path(input_path)
     host_cache_dir = _norm_path(host_cache_dir)
@@ -461,16 +511,219 @@ def run_vep_pipeline(
 
     combined = pd.concat(dfs, ignore_index=True)
     out_feather = out_dir / "vep_combined.feather"
-    out_parquet = out_dir / "vep_combined.parquet"
     combined.to_feather(out_feather)
-    combined.to_parquet(out_parquet, index=False)
-    print(f"[done] wrote {out_feather} and {out_parquet}")
+    print(f"[done] wrote {out_feather}")
 
     has_wt = combined["seq_wt"].notna().sum() if "seq_wt" in combined else 0
     has_mt = combined["seq_mt"].notna().sum() if "seq_mt" in combined else 0
     print(f"[summary] rows: {len(combined):,}  WT seq: {has_wt:,}  MT seq: {has_mt:,}")
 
-    return out_parquet
+    return out_feather
+
+
+def _pct_nonempty(series: Optional[pd.Series]) -> float:
+    if series is None:
+        return 0.0
+    if len(series) == 0:
+        return 0.0
+    s = series.astype("string")
+    mask = s.fillna("").str.strip().ne("")
+    return float(mask.mean() * 100.0)
+
+
+def _format_consequence_counts(
+    series: Optional[pd.Series], *, max_terms: int = 5
+) -> str:
+    if series is None or len(series) == 0:
+        return ""
+    s = series.astype("string").fillna("").str.strip()
+    if s.empty:
+        return ""
+    pretty = s.replace("", "missing").str.replace("_", " ")
+    counts = pretty.value_counts().head(max_terms)
+    if counts.empty:
+        return ""
+    return ", ".join(f"{name}: {count}" for name, count in counts.items())
+
+
+def _log_annotation_report(split: str, df: pd.DataFrame) -> None:
+    total = len(df)
+    if total == 0:
+        print(f"  [vep-report] {split}: no annotations")
+        return
+
+    pct_hgvsc = _pct_nonempty(df.get("hgvsc"))
+    pct_hgvsp = _pct_nonempty(df.get("hgvsp"))
+    pct_mane = _pct_nonempty(df.get("mane_select"))
+    pct_wt_missing = 100.0 - _pct_nonempty(df.get("seq_wt"))
+    pct_mt_missing = 100.0 - _pct_nonempty(df.get("seq_mt"))
+    top_cons = _format_consequence_counts(df.get("most_severe_consequence"))
+
+    print(
+        f"  [vep-report] {split}: rows={total:,} "
+        f"hgvsc={pct_hgvsc:.1f}% hgvsp={pct_hgvsp:.1f}% "
+        f"MANE_Select={pct_mane:.1f}% seq_wt_missing={pct_wt_missing:.1f}% "
+        f"seq_mt_missing={pct_mt_missing:.1f}%"
+    )
+    if top_cons:
+        print(f"               top consequences: {top_cons}")
+
+
+def ensure_vep_annotations(
+    cfg: PipelineConfig,
+    splits: SplitDict,
+    split_paths: PathDict,
+) -> Tuple[SplitDict, Dict[str, Path]]:
+    """Run VEP per split (with caching) and merge annotations back into splits."""
+
+    protein_cfg = cfg.protein
+    cache_dir = protein_cfg.vep_cache_dir
+    fasta_rel = protein_cfg.vep_fasta_relpath
+    if cache_dir is None or not fasta_rel:
+        raise ConfigError(
+            "VEP cache/fasta paths are required. Set Protein.vep_cache_dir and "
+            "Protein.vep_fasta_relpath in the config."
+        )
+
+    vep_root = cfg.paths.artifacts / "vep"
+    vep_root.mkdir(parents=True, exist_ok=True)
+
+    updated: SplitDict = {}
+    vep_outputs: Dict[str, Path] = {}
+
+    desired_cols = [
+        "VariationID",
+        "hgvsc",
+        "hgvsp",
+        "most_severe_consequence",
+        "impact",
+        "consequence_terms",
+        "gene_symbol",
+        "gene_symbol_source",
+        "gene_id",
+        "hgnc_id",
+        "transcript_id",
+        "mane_select",
+        "mane_plus_clinical",
+        "canonical",
+        "strand",
+        "variant_allele",
+        "protein_id",
+        "protein_start",
+        "protein_end",
+        "amino_acids",
+        "codons",
+        "cdna_start",
+        "cdna_end",
+        "cds_start",
+        "cds_end",
+        "assembly_name",
+        "allele_string",
+        "swissprot",
+        "uniprot_isoform",
+        "uniparc",
+    ]
+
+    str_cols = [
+        "hgvsc",
+        "hgvsp",
+        "most_severe_consequence",
+        "impact",
+        "consequence_terms",
+        "gene_symbol",
+        "gene_symbol_source",
+        "gene_id",
+        "hgnc_id",
+        "transcript_id",
+        "mane_select",
+        "mane_plus_clinical",
+        "canonical",
+        "strand",
+        "variant_allele",
+        "protein_id",
+        "amino_acids",
+        "codons",
+        "assembly_name",
+        "allele_string",
+        "swissprot",
+        "uniprot_isoform",
+        "uniparc",
+    ]
+
+    int_cols = [
+        "protein_start",
+        "protein_end",
+        "cdna_start",
+        "cdna_end",
+        "cds_start",
+        "cds_end",
+    ]
+
+    for split, df in splits.items():
+        inp_path = split_paths.get(split)
+        if inp_path is None:
+            raise ConfigError(f"Missing cached split path for '{split}'")
+        if not inp_path.exists():
+            inp_path.parent.mkdir(parents=True, exist_ok=True)
+            df.reset_index(drop=True).to_feather(inp_path)
+
+        vep_dir = vep_root / split
+        vep_dir.mkdir(parents=True, exist_ok=True)
+        combined_path = vep_dir / "vep_combined.feather"
+
+        force = bool(getattr(protein_cfg, "force_vep", False))
+        if combined_path.exists() and not force:
+            print(f"[vep] reuse cached annotations for {split}: {combined_path}")
+        else:
+            print(f"[vep] running annotations for {split} → {vep_dir}")
+            combined_path = run_vep_pipeline(
+                input_path=inp_path,
+                host_cache_dir=Path(cache_dir),
+                fasta_relpath=str(fasta_rel),
+                out_dir=vep_dir,
+                image=protein_cfg.image,
+                filter_mode=protein_cfg.filter_mode,
+                chunk_size=protein_cfg.chunk_size,
+                jobs=protein_cfg.jobs,
+                vep_fork=protein_cfg.vep_fork,
+            )
+
+        combined_path = Path(combined_path)
+        vep_outputs[split] = combined_path
+
+        vep_df = pd.read_feather(combined_path)
+        if "VariationID" not in vep_df.columns:
+            if "id" in vep_df.columns:
+                vep_df["VariationID"] = vep_df["id"].astype(str)
+            else:
+                raise RuntimeError(
+                    f"VEP output for split '{split}' missing VariationID column"
+                )
+
+        _log_annotation_report(split, vep_df)
+
+        ann_cols = [c for c in desired_cols if c in vep_df.columns]
+        ann = vep_df[ann_cols].drop_duplicates(subset=["VariationID"]).copy()
+        ann["_vid_str"] = ann["VariationID"].astype(str)
+
+        merged = df.copy()
+        merged["_vid_str"] = merged["VariationID"].astype(str)
+        merged = merged.merge(ann.drop(columns=["VariationID"]), on="_vid_str", how="left")
+        merged = merged.drop(columns=["_vid_str"])
+
+        for col in str_cols:
+            if col in merged.columns:
+                merged[col] = merged[col].astype("string")
+
+        for col in int_cols:
+            if col in merged.columns:
+                merged[col] = merged[col].astype("Int64")
+
+        merged = merged.reset_index(drop=True)
+        merged.to_feather(inp_path)
+        updated[split] = merged
+
+    return updated, vep_outputs
 
 
 def main():

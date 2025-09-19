@@ -28,22 +28,23 @@ from typing import Dict, Any, Optional, Tuple, List
 from src.llm.eval import evaluate_split_batched
 
 # ----------------------------
-# Prompt-source columns used by your prompt builder
+# Prompt-source columns used by the prompt builder
 # ----------------------------
 PROMPT_SRC_COLS = [
-    # variant strings
-    "Name",
-    "HGVS",
-    "HGVS.p",
-    "HGVS.c",
-    "HGVSp",
-    "HGVSc",
-    "ProteinChange",
-    "cDNAChange",
-    # gene identity
-    "Gene",
+    # VEP-derived fields
+    "gene_symbol",
     "GeneSymbol",
-    "GeneSymbolSimple",
+    "mane_select",
+    "transcript_id",
+    "protein_id",
+    "hgvsc",
+    "hgvsp",
+    "most_severe_consequence",
+    "impact",
+    "consequence_terms",
+    "variant_allele",
+    "amino_acids",
+    "codons",
 ]
 
 # (used for small debug sanity)

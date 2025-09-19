@@ -16,14 +16,7 @@ from tqdm import tqdm
 from src.llm.config import CHAT_SYSTEM, PROMPT_TMPL, BIN_LABELS
 from src.llm.load import load_finetuned_model
 from src.llm.modeling import enable_fast_generate
-
-from src.clinvar import (
-    pick_gene,
-    extract_hgvsc,
-    extract_hgvsp,
-    classify_protein_change,
-    parse_hgvsc_features,
-)
+from .context import build_ctx_from_row
 
 # --- Debug env toggles ---
 _ENV_PROBE = os.environ.get("PATHOLENS_PROBE_PROMPTS", "0") == "1"
@@ -37,54 +30,6 @@ _RX_LABELS = re.compile(r"(?i)\b(benign|pathogenic)\b")
 # -----------------------
 # Context building & hygiene
 # -----------------------
-def build_ctx_from_row(row) -> str:
-    """
-    Build the user-visible context string for the prompt.
-    IMPORTANT: If no context can be built, returns the EMPTY string (""),
-    not a fallback phrase. This is critical for 'cond only' ablations.
-    """
-    ctx = row.get("context", "")
-    if isinstance(ctx, str) and ctx.strip():
-        return ctx
-
-    name = row.get("Name", "") or ""
-    gene = pick_gene(row)
-    hgvsc = extract_hgvsc(name)
-    hgvsp = extract_hgvsp(name)
-    pcls = classify_protein_change(hgvsp)
-    cfeat = parse_hgvsc_features(hgvsc)
-
-    lines: List[str] = []
-    if gene:
-        lines.append(f"Gene: {gene}")
-    if hgvsc:
-        lines.append(f"HGVS.c: {hgvsc}")
-    if hgvsp:
-        lines.append(f"HGVS.p: {hgvsp}")
-    cons = pcls or (
-        "splice"
-        if cfeat["splice"]
-        else (cfeat["kind"] if cfeat["kind"] != "other" else "")
-    )
-    if cons:
-        lines.append(f"Consequence: {cons}")
-    if cfeat["region"] != "unknown":
-        lines.append(f"Region: {cfeat['region']}")
-    if cfeat["splice"]:
-        lines.append("Splice-site: yes")
-    if cfeat["indel_len"] > 0:
-        lines.append(f"Indel length: {cfeat['indel_len']}")
-    if cfeat["frameshift_guess"] is not None:
-        lines.append(
-            f"Frameshift (heuristic): {'yes' if cfeat['frameshift_guess'] else 'no'}"
-        )
-    if cfeat["snv_change"]:
-        lines.append(f"SNV change: {cfeat['snv_change']}")
-
-    # CRITICAL: if nothing could be built, return truly empty
-    return "\n".join(lines) if lines else ""
-
-
 def sanitize_model_text(text: str) -> str:
     s = (text or "").strip()
     if s.startswith("```"):

@@ -71,6 +71,7 @@ def build_protein_caches(
     device: str,
     *,
     split_paths: Optional[Dict[str, Path]] = None,
+    vep_paths: Optional[Dict[str, Path]] = None,
 ) -> Dict[str, SplitArtifact]:
     if not cfg.protein.enabled:
         print("[protein] disabled in config; skipping protein caches")
@@ -101,27 +102,36 @@ def build_protein_caches(
 
         vep_dir = vep_root / split
         vep_dir.mkdir(parents=True, exist_ok=True)
-        combined_parquet = vep_dir / "vep_combined.parquet"
-        if combined_parquet.exists() and not cfg.protein.force_vep:
-            print(f"[protein] reuse VEP output for {split}: {combined_parquet}")
+        provided = Path(vep_paths[split]) if vep_paths and split in vep_paths else None
+        if provided is not None:
+            combined_feather = provided
+            if not combined_feather.exists():
+                raise FileNotFoundError(
+                    f"VEP output for split '{split}' not found at {combined_feather}"
+                )
+            print(f"[protein] using existing VEP output for {split}: {combined_feather}")
         else:
-            print(f"[protein] running VEP for {split} → {vep_dir}")
-            combined_parquet = run_vep_pipeline(
-                input_path=Path(inp_path),
-                host_cache_dir=Path(cfg.protein.vep_cache_dir),
-                fasta_relpath=str(cfg.protein.vep_fasta_relpath),
-                out_dir=vep_dir,
-                image=cfg.protein.image,
-                filter_mode=cfg.protein.filter_mode,
-                chunk_size=cfg.protein.chunk_size,
-                jobs=cfg.protein.jobs,
-                vep_fork=cfg.protein.vep_fork,
-            )
+            combined_feather = vep_dir / "vep_combined.feather"
+            if combined_feather.exists() and not cfg.protein.force_vep:
+                print(f"[protein] reuse VEP output for {split}: {combined_feather}")
+            else:
+                print(f"[protein] running VEP for {split} → {vep_dir}")
+                combined_feather = run_vep_pipeline(
+                    input_path=Path(inp_path),
+                    host_cache_dir=Path(cfg.protein.vep_cache_dir),
+                    fasta_relpath=str(cfg.protein.vep_fasta_relpath),
+                    out_dir=vep_dir,
+                    image=cfg.protein.image,
+                    filter_mode=cfg.protein.filter_mode,
+                    chunk_size=cfg.protein.chunk_size,
+                    jobs=cfg.protein.jobs,
+                    vep_fork=cfg.protein.vep_fork,
+                )
 
         meta_path = protein_dir / f"protein_{split}.feather"
         npz_path = protein_dir / f"protein_{split}_eff_fp16.npz"
         kept_df, _ = process_and_cache_protein(
-            combined_parquet,
+            combined_feather,
             out_meta=str(meta_path),
             out_npz=str(npz_path),
             device=device,
@@ -137,7 +147,7 @@ def build_protein_caches(
             protein_npz=str(npz_path),
             extras={
                 "protein_rows": int(len(kept_df)),
-                "vep_output": str(combined_parquet),
+                "vep_output": str(combined_feather),
             },
         )
     return artifacts

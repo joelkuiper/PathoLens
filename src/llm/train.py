@@ -22,6 +22,7 @@ from transformers import (
 from .config import LLMRunConfig, set_all_seeds
 from .modeling import build_qwen_with_lora
 from .data import CondTextDataset, make_collator
+from .context import build_ctx_from_row
 
 
 class CondTrainer(Trainer):
@@ -268,7 +269,7 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMRunConfig):
     )
 
     row0 = seq_ds_dict["train"].meta.iloc[0]
-    ctx0 = row0.get("context", "")
+    ctx0 = build_ctx_from_row(row0)
     from .chat import build_chat_strings
 
     p0 = f"Variant context (no phenotype):\n{ctx0}\n\nReturn label now:"
@@ -332,7 +333,6 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
             else False
         ),
         gradient_checkpointing=False,
-        use_reentrant=False,
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=cfg.num_workers,

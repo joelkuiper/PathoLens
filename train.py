@@ -9,6 +9,7 @@ from util import get_device
 from src.pipeline import PipelineManifest, SplitArtifact, load_pipeline_config
 from src.pipeline.builders import build_dna_caches, build_protein_caches
 from src.pipeline.clinvar import prepare_clinvar_splits
+from vep_pipeline import ensure_vep_annotations
 from src.pipeline.datasets import build_sequence_datasets
 
 
@@ -51,15 +52,16 @@ def main() -> None:
     print(f"[config] artifacts dir: {cfg.paths.artifacts}")
     print(f"[config] device: {device}")
 
-    # ----- ClinVar splits -----
+    # ----- ClinVar splits + VEP annotations -----
     splits, split_paths = prepare_clinvar_splits(cfg)
+    splits, vep_paths = ensure_vep_annotations(cfg, splits, split_paths)
 
     # ----- DNA caches -----
     dna_artifacts = build_dna_caches(cfg, splits, device)
 
     # ----- Protein caches -----
     protein_artifacts = build_protein_caches(
-        cfg, splits, device, split_paths=split_paths
+        cfg, splits, device, split_paths=split_paths, vep_paths=vep_paths
     )
 
     # ----- Manifest -----
