@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os
+from pathlib import Path
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
@@ -20,62 +21,71 @@ def _select_compute_dtype():
 
 
 def load_finetuned_model(
-    model_id: str, D_cond: int, adapter_dir: str, projector_path: str
+    model_id: str,
+    D_cond: int,
+    adapter_dir: str,
+    projector_path: str,
 ):
     """
-    Load tokenizer, 4-bit base model + LoRA adapter, and a validated CondProjector.
+    Load tokenizer, 4-bit base model + LoRA adapter, and the CondProjector.
 
-    Strong checks:
-      - projector_path must exist
-      - projector's Linear weight shape must match (hidden*k, D_cond)
-      - k inferred from saved weights; used to reconstruct projector
+    Assumptions (no backward compatibility):
+      - Projector state dict contains keys from the architecture:
+          - 'norm.*'
+          - 'fc.0.weight' (Linear: [hidden*k, D_cond])
+          - 'fc.0.bias'
+          - 'fc.3.weight' (second Linear)
+          - 'aux_head.*'
+          - 'gain'
+      - We infer k and validate D_cond from 'fc.0.weight'.
     """
     if not os.path.isdir(adapter_dir):
         raise FileNotFoundError(f"[LOAD] Adapter directory not found: {adapter_dir}")
     if not os.path.exists(projector_path):
         raise FileNotFoundError(f"[LOAD] Projector weights not found: {projector_path}")
 
+    # ----- Tokenizer -----
     tok = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
 
+    # ----- Base (4-bit) -----
     quant = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=_select_compute_dtype(),
     )
-
     base = AutoModelForCausalLM.from_pretrained(
-        model_id, trust_remote_code=True, quantization_config=quant, device_map="auto"
+        model_id,
+        trust_remote_code=True,
+        quantization_config=quant,
+        device_map="auto",
     )
 
+    # ----- LoRA adapter -----
     print("[LOAD] Loading adapter via PeftModel.from_pretrained:", adapter_dir)
     model = PeftModel.from_pretrained(base, adapter_dir)
     model.eval()
 
-    # --- Inspect saved projector to validate D_cond and infer k ---
+    # ----- Inspect projector checkpoint  -----
     state = torch.load(projector_path, map_location="cpu")
-    # Expect keys like 'net.0.weight' / 'net.0.bias' for (Linear → GELU)
-    if "net.0.weight" not in state:
+    if "fc.0.weight" not in state:
         raise KeyError(
-            "[LOAD] Projector state missing 'net.0.weight'. "
-            "Did the projector architecture change?"
+            "[LOAD] Expected projector checkpoint with 'fc.0.weight' "
+            "(Linear from D_cond -> hidden*k)."
         )
 
-    W = state["net.0.weight"]  # shape: [hidden*k, D_cond_saved]
+    W = state["fc.0.weight"]  # shape: [hidden*k, D_cond_saved]
     if W.ndim != 2:
-        raise ValueError(
-            f"[LOAD] Unexpected projector weight ndim={W.ndim}, expected 2."
-        )
-
-    hidden = int(model.config.hidden_size)
+        raise ValueError(f"[LOAD] fc.0.weight has ndim={W.ndim}, expected 2.")
     out_features, D_cond_saved = int(W.shape[0]), int(W.shape[1])
 
+    hidden = int(model.config.hidden_size)
     if out_features % hidden != 0:
         raise ValueError(
-            "[LOAD] Projector out_features is not divisible by model hidden size:\n"
+            "[LOAD] fc.0.out_features not divisible by model hidden size:\n"
             f"        out_features={out_features}, hidden_size={hidden}\n"
             "        Cannot infer k (n_cond_tokens)."
         )
@@ -86,24 +96,23 @@ def load_finetuned_model(
             "[LOAD] D_cond mismatch:\n"
             f"        Provided D_cond={D_cond}\n"
             f"        Saved projector expects D_cond={D_cond_saved}\n"
-            "        Pass the correct D_cond (e.g., D_eff + D_go + D_prot) to evaluation."
+            "        Pass the correct D_cond (e.g., D_eff + D_go + D_prot)."
         )
 
     print(
         f"[LOAD] Projector check OK: hidden={hidden} k={k_saved} D_cond={D_cond_saved}"
     )
 
-    # --- Rebuild projector exactly as trained and load weights strictly ---
+    # ----- Rebuild projector and load weights strictly -----
     emb = model.get_input_embeddings().weight
     projector = CondProjector(D_cond_saved, hidden, k=k_saved).to(
         device=emb.device, dtype=emb.dtype
     )
-    # Replace/attach
     model.add_module("cond_projector", projector)
 
     missing, unexpected = model.cond_projector.load_state_dict(state, strict=True)
     if missing or unexpected:
-        # strict=True should raise before here, but keep a guard
+        # strict=True should fail before this, but keep guard
         raise RuntimeError(
             f"[LOAD] Projector state mismatch. Missing={missing} Unexpected={unexpected}"
         )
