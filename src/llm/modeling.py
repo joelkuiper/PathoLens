@@ -6,14 +6,58 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
-import torch
-import torch.nn as nn
+from typing import Tuple
+
+
+class ViewTokens(nn.Module):
+    def __init__(self, k: int, d_out: int):
+        super().__init__()
+        self.k, self.d_out = k, d_out
+
+    def forward(self, y: torch.Tensor) -> torch.Tensor:
+        # y: (B, k*d_out) -> (B, k, d_out)
+        B = y.size(0)
+        return y.view(B, self.k, self.d_out)
+
+
+class RMSCenter(nn.Module):
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        # per-token zero-mean + unit-RMS over last dim
+        t = t - t.mean(dim=-1, keepdim=True)
+        rms = torch.sqrt(t.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return t / rms
+
+
+class TokenAffine(nn.Module):
+    def __init__(self, k: int):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(k))  # per-token scale
+        self.beta = nn.Parameter(torch.zeros(k))  # per-token shift
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        # t: (B, k, d_out)
+        return t * self.gamma.view(1, -1, 1) + self.beta.view(1, -1, 1)
+
+
+class GlobalGain(nn.Module):
+    def __init__(self, init: float = 1.0):
+        super().__init__()
+        self.gain = nn.Parameter(torch.tensor(float(init)))
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        return self.gain * t
+
+
+# --- the projector ---
 
 
 class CondProjector(nn.Module):
     """
-    Map conditioning vector -> k virtual tokens in hidden space
-    and an auxiliary classification head.
+    (B, d_in) -> (B, k, d_out) virtual tokens + (B, n_classes) aux logits
     """
 
     def __init__(
@@ -27,65 +71,34 @@ class CondProjector(nn.Module):
     ):
         super().__init__()
         self.k = k
-        self.h = d_out
-        self.eps = eps
+        self.d_out = d_out
 
-        # Pre-normalize the conditioning vector
-        self.norm_in = nn.LayerNorm(d_in)
+        # backbone in flat space (B, k*d_out)
+        self.backbone = nn.Sequential(
+            nn.LayerNorm(d_in),
+            nn.Linear(d_in, d_out * k),
+            nn.GELU(),
+            nn.Dropout(p_drop),
+            nn.Linear(d_out * k, d_out * k),
+        )
 
-        # 2-layer MLP projector
-        self.fc1 = nn.Linear(d_in, d_out * k, bias=True)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(p_drop)
-        self.fc2 = nn.Linear(d_out * k, d_out * k, bias=True)
+        # reshape + normalize + simple per-token affine + global gain
+        self.to_tokens = nn.Sequential(
+            ViewTokens(k, d_out),
+            RMSCenter(eps),
+            TokenAffine(k),
+            GlobalGain(1.0),
+        )
 
-        # Per-token affine after RMS centering (broadcast across hidden dim)
-        self.gamma = nn.Parameter(torch.ones(k))  # multiplicative
-        self.beta = nn.Parameter(torch.zeros(k))  # additive
-        self.global_gain = nn.Parameter(torch.tensor(1.0))  # overall scalar
-
-        # Aux head stays on the flattened token block
+        # aux head on the flattened block
         self.aux_head = nn.Linear(d_out * k, n_classes)
 
-        self._init_weights()
-
-    def _init_weights(self):
-        # Kaiming for the first layer
-        nn.init.kaiming_uniform_(self.fc1.weight, a=0.0, nonlinearity="gelu")
-        nn.init.zeros_(self.fc1.bias)
-
-        # Small init on the second layer so outputs start near 0 (stable)
-        nn.init.zeros_(self.fc2.weight)
-        nn.init.zeros_(self.fc2.bias)
-
-        # Aux head starts small too
-        nn.init.zeros_(self.aux_head.weight)
-        nn.init.zeros_(self.aux_head.bias)
-
-        # gamma=1, beta=0, global_gain=1 already set
-
-    def _rms_center(self, T: torch.Tensor) -> torch.Tensor:
-        # T: [B, k, H] -> zero-mean + unit-RMS per token
-        T = T - T.mean(dim=-1, keepdim=True)
-        rms = torch.sqrt(T.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return T / rms
-
-    def forward(self, x: torch.Tensor):
-        # x: [B, d_in]
-        B = x.size(0)
-        x = self.norm_in(x)
-
-        y = self.fc2(self.drop(self.act(self.fc1(x))))  # [B, k*H]
-        aux_logits = self.aux_head(y)  # [B, n_classes]
-
-        T = y.view(B, self.k, self.h)  # [B, k, H]
-        T = self._rms_center(T)  # per-token normalize
-
-        # Per-token affine + global gain (no external stats required)
-        T = T * self.gamma.view(1, self.k, 1) + self.beta.view(1, self.k, 1)
-        T = self.global_gain * T
-
-        return T, aux_logits
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # x: (B, d_in)
+        y = self.backbone(x)  # (B, k*d_out)
+        tokens = self.to_tokens(y)  # (B, k, d_out)
+        aux_logits = self.aux_head(y)  # (B, n_classes)
+        return tokens, aux_logits
 
 
 def build_qwen_with_lora(cfg, D_cond: int):
