@@ -1,19 +1,15 @@
 # src/llm/ablation_prompt_cond.py
 # -*- coding: utf-8 -*-
-# Prompt vs Conditioning ablation: {cond+prompt, cond only, prompt only, zero_dna, zero_go, zero_prot}
+# Prompt vs Conditioning ablation:
+#   - cond+prompt : normal evaluation (conditioning + prompt)
+#   - cond only   : prompt blanked, conditioning present
+#   - prompt only : prompt intact, conditioning zeroed
+#   - cond+noise  : prompt intact, conditioning + strong Gaussian noise
+#   - cond+permute: prompt intact, conditioning permuted across samples
+#   - pure-noise  : prompt intact, conditioning replaced by pure noise
+#   - cond×scale  : prompt intact, conditioning multiplied by scalar(s)
 #
-# - cond+prompt: normal evaluation (conditioning tokens + prompt)
-# - cond only  : prompt fields blanked, conditioning tokens present
-# - prompt only: prompt intact, conditioning vector zeroed
-# - zero_dna   : prompt intact, conditioning present but DNA slice zeroed
-# - zero_go    : prompt intact, conditioning present but GO slice zeroed
-# - zero_prot  : prompt intact, conditioning present but Protein slice zeroed
-#
-# Non-mutating:
-#   * Dataset content is never permanently modified (prompt blanking is a context manager).
-#   * Model files are never touched; we call evaluate_split_batched which loads read-only.
-#
-# Requires: src.llm.eval.evaluate_split_batched (fixed to use D_eff + D_go + D_prot)
+# Non-mutating: dataset and model artifacts are never modified.
 
 from __future__ import annotations
 import re
@@ -22,8 +18,7 @@ import numpy as np
 import torch
 from dataclasses import dataclass
 from contextlib import contextmanager
-from typing import Dict, Any, Optional, Tuple, List
-
+from typing import Dict, Any, Optional, Tuple, List, Sequence
 
 from src.llm.eval import evaluate_split_batched
 
@@ -84,11 +79,7 @@ def _debug_dump_sources(meta_before, meta_after, tag: str, cols):
 
 @contextmanager
 def _prompt_blank_context(ds_split, *, debug: bool = True):
-    """
-    Temporarily blank *all prompt source fields* for a split, including `Name`.
-    Also sets a flag so evaluate_split_batched can force ctx="".
-    Fully restores original values on exit.
-    """
+    """Temporarily blank *all prompt fields* (including Name)."""
     meta = ds_split.meta
     cols = [c for c in PROMPT_SRC_COLS + ["Name"] if c in meta.columns]
     if not cols:
@@ -100,7 +91,6 @@ def _prompt_blank_context(ds_split, *, debug: bool = True):
     try:
         for c in cols:
             meta[c] = ""
-        # flag for eval.py
         setattr(ds_split, "_force_blank_prompts", True)
         if debug:
             _debug_dump_sources(before, meta[cols], tag="prompt_blank", cols=cols)
@@ -113,26 +103,27 @@ def _prompt_blank_context(ds_split, *, debug: bool = True):
 
 
 # ----------------------------
-# Conditioning zeroing / masking views
+# Conditioning transforms (identity / zero / noise / permute / scale / pure-noise)
 # ----------------------------
 @dataclass
-class _MaskCfg:
-    mode: str  # 'identity' | 'zero' | 'selective'
-    zero_slices: Optional[List[Tuple[int, int]]] = None
-    # zero_slices is a list of [start, end) index ranges to zero when mode='selective'
+class _CondTransformCfg:
+    mode: str  # 'identity'|'zero'|'noise'|'permute'|'scale'|'pure-noise'
+    noise_std: Optional[float] = None  # absolute sigma if provided
+    noise_alpha: float = 0.0  # if noise_std is None, use alpha*std(v)
+    scale: float = 1.0
+    perm_index: Optional[np.ndarray] = None  # length = len(split)
 
 
-class _MaskedSplit:
+class _TransformedSplit:
     """
-    Read-through view of a split that optionally zeros the conditioning vector (all or slices).
+    Read-through view that transforms the conditioning vector per item.
     Returns a CPU torch.Tensor so downstream `.numpy()` continues to work.
-    Forwards attributes to the underlying split (including D_eff/D_go/D_prot/meta).
+    Forwards attributes to the underlying split (including meta/D_eff/D_go/D_prot).
     """
 
-    def __init__(self, base_split, cfg: _MaskCfg):
+    def __init__(self, base_split, cfg: _CondTransformCfg):
         self.base = base_split
         self.cfg = cfg
-        # Explicitly keep meta for pandas ops
         self.meta = getattr(base_split, "meta", None)
 
     def __len__(self):
@@ -140,101 +131,131 @@ class _MaskedSplit:
 
     def __getitem__(self, i):
         x, y1, y2 = self.base[i]
-        v = x.numpy() if hasattr(x, "numpy") else np.asarray(x, dtype=np.float32)
-        v = v.astype(np.float32, copy=False)
 
-        if self.cfg.mode == "zero":
-            z = np.zeros_like(v, dtype=np.float32)
-        elif self.cfg.mode == "selective" and self.cfg.zero_slices:
-            z = v.copy()
-            for s, e in self.cfg.zero_slices:
-                # Guard slice within bounds
-                s_cl = max(0, min(s, z.shape[0]))
-                e_cl = max(s_cl, min(e, z.shape[0]))
-                if e_cl > s_cl:
-                    z[s_cl:e_cl] = 0.0
+        # Optionally fetch a different vector (permute across dataset)
+        if self.cfg.mode == "permute":
+            j = int(self.cfg.perm_index[i])  # remap index
+            x_src, _, _ = self.base[j]
+            v = (
+                x_src.numpy()
+                if hasattr(x_src, "numpy")
+                else np.asarray(x_src, dtype=np.float32)
+            )
         else:
-            z = v  # identity
+            v = x.numpy() if hasattr(x, "numpy") else np.asarray(x, dtype=np.float32)
+
+        v = v.astype(np.float32, copy=False)
+        mode = self.cfg.mode
+
+        if mode == "zero":
+            z = np.zeros_like(v, dtype=np.float32)
+
+        elif mode == "pure-noise":
+            # Replace entirely by noise
+            sigma = float(self.cfg.noise_std if self.cfg.noise_std is not None else 1.0)
+            z = np.random.normal(0.0, sigma, size=v.shape).astype(np.float32)
+
+        elif mode == "noise":
+            # Additive noise to existing vector
+            if self.cfg.noise_std is not None:
+                sigma = float(self.cfg.noise_std)
+            else:
+                sigma = float(self.cfg.noise_alpha) * (np.std(v) + 1e-6)
+            noise = np.random.normal(0.0, sigma, size=v.shape).astype(np.float32)
+            z = v + noise
+
+        elif mode == "scale":
+            z = (float(self.cfg.scale) * v).astype(np.float32, copy=False)
+
+        else:  # identity or permute (already swapped)
+            z = v
 
         return torch.from_numpy(z), y1, y2
 
     def __getattr__(self, name):
-        # Forward everything else (e.g., D_eff/D_go/D_prot)
         return getattr(self.base, name)
 
 
 def _with_cond_identity(seq_ds: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = _MaskCfg(mode="identity")
-    return {k: _MaskedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
+    cfg = _CondTransformCfg(mode="identity")
+    return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
 
 
 def _with_cond_zero(seq_ds: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = _MaskCfg(mode="zero")
-    return {k: _MaskedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
+    cfg = _CondTransformCfg(mode="zero")
+    return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
 
 
-def _with_cond_selective(
-    seq_ds: Dict[str, Any], zero_slices: List[Tuple[int, int]]
+def _with_cond_noise(
+    seq_ds: Dict[str, Any], *, noise_std: Optional[float], noise_alpha: float
 ) -> Dict[str, Any]:
-    cfg = _MaskCfg(mode="selective", zero_slices=list(zero_slices))
-    return {k: _MaskedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
+    cfg = _CondTransformCfg(mode="noise", noise_std=noise_std, noise_alpha=noise_alpha)
+    return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
+
+
+def _with_cond_pure_noise(
+    seq_ds: Dict[str, Any], *, noise_std: float = 1.0
+) -> Dict[str, Any]:
+    cfg = _CondTransformCfg(mode="pure-noise", noise_std=float(noise_std))
+    return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
+
+
+def _with_cond_permute(
+    seq_ds: Dict[str, Any], *, split: str, seed: int = 13
+) -> Dict[str, Any]:
+    n = len(seq_ds[split])
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(n).astype(np.int64)
+    cfg = _CondTransformCfg(mode="permute", perm_index=perm)
+    out = {}
+    for k in ("train", "val", "test"):
+        # for splits other than `split`, just identity (we only evaluate one split at a time)
+        out[k] = _TransformedSplit(
+            seq_ds[k], cfg if k == split else _CondTransformCfg(mode="identity")
+        )
+    return out
+
+
+def _with_cond_scale(seq_ds: Dict[str, Any], *, scale: float) -> Dict[str, Any]:
+    cfg = _CondTransformCfg(mode="scale", scale=float(scale))
+    return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
 
 
 # ----------------------------
-# Helpers to derive slice layout and verify masking really happened
+# Debug helpers
 # ----------------------------
-def _slice_layout(seq_ds: Dict[str, Any]) -> Dict[str, Tuple[int, int]]:
-    """
-    Returns index ranges [start, end) for dna/go/prot within the conditioning vector.
-    """
-    D_eff = int(seq_ds["train"].D_eff)
-    D_go = int(seq_ds["train"].D_go)
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-
-    i = 0
-    dna = (i, i + D_eff)
-    i += D_eff
-    go = (i, i + D_go)
-    i += D_go
-    prot = (i, i + D_prot) if D_prot > 0 else (i, i)
-    return {"dna": dna, "go": go, "prot": prot}
-
-
-def _debug_check_masking(
-    ds_split, zero_slices: List[Tuple[int, int]], tag: str, n: int = 3
+def _debug_check_noise(
+    ds_split, noise_std: Optional[float], noise_alpha: float, tag: str, n: int = 3
 ):
-    """
-    Print norms of cond vec segments before and after masking for a few items.
-    Uses the underlying (unmasked) split plus a masked view.
-    """
-    if n <= 0:
-        return
-
-    # Build masked view for this split only
-    view = _MaskedSplit(ds_split, _MaskCfg(mode="selective", zero_slices=zero_slices))
-
-    print(f"[debug:{tag}] masking slices:", zero_slices)
+    view = _TransformedSplit(
+        ds_split,
+        _CondTransformCfg(mode="noise", noise_std=noise_std, noise_alpha=noise_alpha),
+    )
+    print(f"[debug:{tag}] noise_std={noise_std} noise_alpha={noise_alpha}")
     for i in range(min(n, len(ds_split))):
         x0, *_ = ds_split[i]
         v0 = x0.numpy().astype(np.float32, copy=False)
         xm, *_ = view[i]
         vm = xm.numpy().astype(np.float32, copy=False)
-
-        # Quick sanity: shapes
-        if v0.shape != vm.shape:
-            print(f"[debug:{tag}] shape mismatch at i={i}: {v0.shape} vs {vm.shape}")
-
-        # Norms / segment norms
-        n0 = float(np.linalg.norm(v0))
-        nm = float(np.linalg.norm(vm))
-        segs = []
-        for s, e in zero_slices:
-            s_cl = max(0, min(s, v0.shape[0]))
-            e_cl = max(s_cl, min(e, v0.shape[0]))
-            segs.append(float(np.linalg.norm(vm[s_cl:e_cl])))
+        sig = np.std(v0) + 1e-8
+        nse = np.std(vm - v0) + 1e-8
+        snr = (sig / nse) if nse > 0 else float("inf")
         print(
-            f"[debug:{tag}] i={i} ||v0||={n0:.4f} ||vm||={nm:.4f} "
-            f"masked_seg_norms={', '.join(f'{x:.4f}' for x in segs)}"
+            f"[debug:{tag}] i={i} ||v||_2(before)={np.linalg.norm(v0):.4f} "
+            f"||v||_2(after)={np.linalg.norm(vm):.4f}  std(v)={sig:.5f} std(noise)={nse:.5f}  SNR≈{snr:.3f}"
+        )
+
+
+def _debug_check_scale(ds_split, scale: float, tag: str, n: int = 3):
+    view = _TransformedSplit(ds_split, _CondTransformCfg(mode="scale", scale=scale))
+    print(f"[debug:{tag}] scale={scale}")
+    for i in range(min(n, len(ds_split))):
+        x0, *_ = ds_split[i]
+        v0 = x0.numpy().astype(np.float32, copy=False)
+        xm, *_ = view[i]
+        vm = xm.numpy().astype(np.float32, copy=False)
+        print(
+            f"[debug:{tag}] i={i} ||v||_2(before)={np.linalg.norm(v0):.4f} ||v||_2(after)={np.linalg.norm(vm):.4f}"
         )
 
 
@@ -244,29 +265,31 @@ def _debug_check_masking(
 def run_prompt_vs_cond_ablation(
     seq_ds: Dict[str, Any],
     *,
-    out_dir: str = "artifacts/qwen3_hpo_lora",  # points to trained adapter dir
+    out_dir: str = "artifacts/qwen3",
     split: str = "val",
     max_n: Optional[int] = None,
     batch_size: int = 64,
     debug_prompts: bool = True,
-    debug_masking: bool = True,
+    debug_noise: bool = True,
+    noise_std: Optional[float] = 1.5,  # strong absolute sigma by default
+    noise_alpha: float = 0.0,  # ignored when noise_std is set
+    do_permute: bool = True,
+    scale_sweep: Sequence[float] = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0),
+    do_pure_noise: bool = True,
 ) -> Dict[str, dict]:
     """
-    Runs six evaluations using the SAME training artifacts:
-      1) cond+prompt  (normal; conditioning + prompt)
-      2) cond only    (prompt blanked; conditioning present)
-      3) prompt only  (conditioning zeroed entirely)
-      4) zero_dna     (prompt intact; zero DNA slice in cond)
-      5) zero_go      (prompt intact; zero GO slice in cond)
-      6) zero_prot    (prompt intact; zero Protein slice in cond, if present)
+    Evaluates:
+      1) cond only     (prompt blanked; conditioning present)
+      2) cond+prompt   (baseline; conditioning + prompt)
+      3) prompt only   (conditioning zeroed entirely)
+      4) cond+noise    (conditioning noised; prompt intact)
+      5) cond+permute  (conditioning shuffled across items; prompt intact)
+      6) pure-noise    (conditioning replaced by noise; prompt intact)
+      7) cond×scale(s) (conditioning scaled by each factor; prompt intact)
 
-    Returns a dict of mode -> metrics dict (from evaluate_split_batched).
+    Returns: dict of mode -> metrics.
     """
     results: Dict[str, dict] = {}
-
-    # Compute slice layout once (based on train split metadata)
-    layout = _slice_layout(seq_ds)
-    dna_slice, go_slice, prot_slice = layout["dna"], layout["go"], layout["prot"]
 
     # --- (1) cond only (blank prompts) ---
     print("\n[ABL] cond only (prompts blanked)")
@@ -279,11 +302,10 @@ def run_prompt_vs_cond_ablation(
             max_n=max_n,
             batch_size=batch_size,
             sample_rationales=0,
-            # debug_prompt_probe=True,
         )
     results["cond_only"] = out
 
-    # --- (2) cond+prompt ---
+    # --- (2) cond+prompt (baseline) ---
     print("\n[ABL] cond+prompt (baseline)")
     view_normal = _with_cond_identity(seq_ds)
     out = evaluate_split_batched(
@@ -299,14 +321,6 @@ def run_prompt_vs_cond_ablation(
     # --- (3) prompt only (conditioning removed) ---
     print("\n[ABL] prompt only (conditioning zeroed)")
     view_prompt_only = _with_cond_zero(seq_ds)
-    # Quick check: show a few norms to prove zeroing took effect
-    if debug_masking:
-        _debug_check_masking(
-            seq_ds[split],
-            [(0, dna_slice[1] if prot_slice[1] == 0 else prot_slice[1])],
-            tag="prompt_only_total",
-            n=3,
-        )
     out = evaluate_split_batched(
         view_prompt_only,
         out_dir=out_dir,
@@ -316,6 +330,74 @@ def run_prompt_vs_cond_ablation(
         sample_rationales=0,
     )
     results["prompt_only"] = out
+
+    # --- (4) cond+noise (conditioning + strong Gaussian noise) ---
+    print("\n[ABL] cond+noise (conditioning + Gaussian noise)")
+    if debug_noise:
+        _debug_check_noise(
+            seq_ds[split],
+            noise_std=noise_std,
+            noise_alpha=noise_alpha,
+            tag="cond_noise",
+            n=3,
+        )
+    view_noise = _with_cond_noise(seq_ds, noise_std=noise_std, noise_alpha=noise_alpha)
+    out = evaluate_split_batched(
+        view_noise,
+        out_dir=out_dir,
+        split=split,
+        max_n=max_n,
+        batch_size=batch_size,
+        sample_rationales=0,
+    )
+    results["cond+noise"] = out
+
+    # --- (5) cond+permute (destroy alignment but keep distribution) ---
+    if do_permute:
+        print("\n[ABL] cond+permute (conditioning shuffled across items)")
+        view_perm = _with_cond_permute(seq_ds, split=split, seed=13)
+        out = evaluate_split_batched(
+            view_perm,
+            out_dir=out_dir,
+            split=split,
+            max_n=max_n,
+            batch_size=batch_size,
+            sample_rationales=0,
+        )
+        results["cond+permute"] = out
+
+    # --- (6) pure-noise (conditioning replaced entirely by noise) ---
+    if do_pure_noise:
+        print("\n[ABL] pure-noise (conditioning replaced by noise)")
+        view_pn = _with_cond_pure_noise(
+            seq_ds, noise_std=(noise_std if noise_std is not None else 1.0)
+        )
+        out = evaluate_split_batched(
+            view_pn,
+            out_dir=out_dir,
+            split=split,
+            max_n=max_n,
+            batch_size=batch_size,
+            sample_rationales=0,
+        )
+        results["pure-noise"] = out
+
+    # --- (7) cond×scale sweep ---
+    if scale_sweep:
+        for s in scale_sweep:
+            tag = f"cond×scale={s:g}"
+            print(f"\n[ABL] {tag}")
+            _debug_check_scale(seq_ds[split], scale=s, tag=f"scale_{s}", n=3)
+            view_scale = _with_cond_scale(seq_ds, scale=s)
+            out = evaluate_split_batched(
+                view_scale,
+                out_dir=out_dir,
+                split=split,
+                max_n=max_n,
+                batch_size=batch_size,
+                sample_rationales=0,
+            )
+            results[tag] = out
 
     # --- Pretty print ---
     def _get(res, k):
@@ -327,9 +409,16 @@ def run_prompt_vs_cond_ablation(
     print(f"\nAblation summary [{split}]")
     print(f"{'Mode':14} {'N':>6} {'Acc':>8} {'F1':>8} {'ROC-AUC':>10} {'PR-AUC':>10}")
     print("-" * 54)
-    ordered = ["cond+prompt", "cond_only", "prompt_only"]
-    # if has_prot:
-    #     ordered.append("zero_prot")
+    ordered = ["cond+prompt", "cond_only", "prompt_only", "cond+noise"]
+    if "cond+permute" in results:
+        ordered.append("cond+permute")
+    if "pure-noise" in results:
+        ordered.append("pure-noise")
+    for s in scale_sweep:
+        tag = f"cond×scale={s:g}"
+        if tag in results:
+            ordered.append(tag)
+
     for name in ordered:
         r = results[name]
         print(
@@ -354,8 +443,12 @@ def run_prompt_vs_cond_ablation(
     return results
 
 
-# Example usage:
+# Example:
 # res = run_prompt_vs_cond_ablation(
-#     seq_ds, out_dir="artifacts/qwen3_hpo_lora",
-#     split="val", max_n=2000, batch_size=64, debug_prompts=True, debug_masking=True
+#     seq_ds, out_dir="artifacts/qwen3",
+#     split="test", max_n=None, batch_size=64,
+#     noise_std=1.5,  # strong absolute noise
+#     do_permute=True,
+#     scale_sweep=(0.0, 0.25, 0.5, 1.0, 2.0, 4.0),
+#     do_pure_noise=True,
 # )
