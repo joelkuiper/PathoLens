@@ -44,7 +44,6 @@ class SplitArtifact:
 
 @dataclass
 class PipelineManifest:
-    go_npz: str
     splits: Dict[str, SplitArtifact]
     created_at: str = field(
         default_factory=lambda: datetime.utcnow().replace(microsecond=0).isoformat()
@@ -54,7 +53,6 @@ class PipelineManifest:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "created_at": self.created_at,
-            "go": {"npz": self.go_npz},
             "splits": {k: v.to_dict() for k, v in self.splits.items()},
             "extras": self.extras,
         }
@@ -73,14 +71,14 @@ class PipelineManifest:
         p = Path(path)
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        go_block = data.get("go", {})
-        go_npz = go_block.get("npz")
-        if not go_npz:
-            raise ValueError(f"Manifest {p} missing go.npz entry")
         splits_dict = {
             name: SplitArtifact.from_dict(block)
             for name, block in data.get("splits", {}).items()
         }
         extras = data.get("extras", {})
+        go_block = data.get("go")
+        if go_block:
+            extras = dict(extras) if isinstance(extras, dict) else {}
+            extras.setdefault("legacy", {})["go"] = go_block
         created_at = data.get("created_at") or datetime.utcnow().isoformat()
-        return cls(go_npz=go_npz, splits=splits_dict, created_at=created_at, extras=extras)
+        return cls(splits=splits_dict, created_at=created_at, extras=extras)

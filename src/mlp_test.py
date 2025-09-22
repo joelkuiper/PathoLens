@@ -6,18 +6,14 @@ Ablation MLP probe for PathoLens
 
 Trains a small MLP on features from SequenceTowerDataset and evaluates:
   - dna
-  - go
   - prot
-  - dna+go
   - dna+prot
-  - go+prot
-  - dna+go+prot
 
 Assumes SequenceTowerDataset packs features in this order per sample:
-  [ dna_eff | go_vec | (optional) prot_eff ]
+  [ dna_eff | (optional) prot_eff ]
 
 Relies on dataset attributes:
-  ds.D_eff, ds.D_go, ds.D_prot (0 if protein was not provided)
+  ds.D_eff, ds.D_prot (0 if protein was not provided)
 
 Usage:
     from src.mlp_test import run_ablation_probes, print_probe_table
@@ -121,14 +117,13 @@ def _feat_matrix(split, desc) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _slice_blocks(
-    X: np.ndarray, D_eff: int, D_go: int, D_prot: int
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    X: np.ndarray, D_eff: int, D_prot: int
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     dna = X[:, :D_eff]
-    go = X[:, D_eff : D_eff + D_go]
     prot = None
     if D_prot and D_prot > 0:
-        prot = X[:, D_eff + D_go : D_eff + D_go + D_prot]
-    return dna, go, prot
+        prot = X[:, D_eff : D_eff + D_prot]
+    return dna, prot
 
 
 # --------------------------
@@ -182,7 +177,6 @@ def _run_single_probe(
     np.random.seed(seed)
 
     D_eff = int(seq_ds["train"].D_eff)
-    D_go = int(seq_ds["train"].D_go)
     D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
 
     # pull features
@@ -190,15 +184,12 @@ def _run_single_probe(
     Xv_all, yv = _feat_matrix(seq_ds["val"], "[val]")
     Xt_all, yt = _feat_matrix(seq_ds["test"], "[test]")
 
-    tr_dna, tr_go, tr_prot = _slice_blocks(Xtr_all, D_eff, D_go, D_prot)
-    va_dna, va_go, va_prot = _slice_blocks(Xv_all, D_eff, D_go, D_prot)
-    te_dna, te_go, te_prot = _slice_blocks(Xt_all, D_eff, D_go, D_prot)
+    tr_dna, tr_prot = _slice_blocks(Xtr_all, D_eff, D_prot)
+    va_dna, va_prot = _slice_blocks(Xv_all, D_eff, D_prot)
+    te_dna, te_prot = _slice_blocks(Xt_all, D_eff, D_prot)
 
-    use_dna = feat_mode in ("dna", "dna+go", "dna+prot", "dna+go+prot")
-    use_go = feat_mode in ("go", "dna+go", "go+prot", "dna+go+prot")
-    use_prot = (
-        feat_mode in ("prot", "dna+prot", "go+prot", "dna+go+prot") and D_prot > 0
-    )
+    use_dna = feat_mode in ("dna", "dna+prot")
+    use_prot = feat_mode in ("prot", "dna+prot") and D_prot > 0
 
     # z-score each active block separately (fit on train)
     def zfit(X):
@@ -213,28 +204,28 @@ def _run_single_probe(
         tr_dna, sc_dna = zfit(tr_dna)
         va_dna = zapply(va_dna, sc_dna)
         te_dna = zapply(te_dna, sc_dna)
-    if use_go:
-        tr_go, sc_go = zfit(tr_go)
-        va_go = zapply(va_go, sc_go)
-        te_go = zapply(te_go, sc_go)
     if use_prot:
+        if tr_prot is None:
+            raise ValueError("Protein features requested but unavailable in dataset")
         tr_prot, sc_pr = zfit(tr_prot)
         va_prot = zapply(va_prot, sc_pr)
         te_prot = zapply(te_prot, sc_pr)
 
-    def assemble(A, B, C):
+    def assemble(A, C):
         parts: List[np.ndarray] = []
         if use_dna:
             parts.append(A)
-        if use_go:
-            parts.append(B)
         if use_prot and C is not None:
             parts.append(C)
-        return np.concatenate(parts, axis=1) if parts else A
+        if not parts:
+            raise ValueError(f"No features selected for mode '{feat_mode}'")
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts, axis=1)
 
-    Xtr = assemble(tr_dna, tr_go, tr_prot)
-    Xv = assemble(va_dna, va_go, va_prot)
-    Xt = assemble(te_dna, te_go, te_prot)
+    Xtr = assemble(tr_dna, tr_prot)
+    Xv = assemble(va_dna, va_prot)
+    Xt = assemble(te_dna, te_prot)
 
     # tensors
     trX = torch.tensor(Xtr)
@@ -382,9 +373,9 @@ def run_ablation_probes(
     Run a grid of ablation probes. Returns {mode: result_dict}.
     """
     D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-    default_modes = ["dna", "go", "dna+go"]
+    default_modes = ["dna"]
     if D_prot > 0:
-        default_modes += ["prot", "dna+prot", "go+prot", "dna+go+prot"]
+        default_modes += ["prot", "dna+prot"]
     if modes is None:
         modes = default_modes
 

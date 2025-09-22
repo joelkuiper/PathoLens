@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-from src.go_n2v_utils import GeneGOEmbeddings
 
 
 def _fmt_path(p: Optional[str], label: str) -> str:
@@ -25,7 +24,6 @@ class SequenceTowerDataset(Dataset):
         self,
         meta_feather: str,
         dna_npz: str,
-        go_npz: str,
         *,
         eff_key: str = "dna_eff",
         make_label: bool = True,
@@ -34,14 +32,11 @@ class SequenceTowerDataset(Dataset):
         protein_meta_feather: Optional[str] = None,
         protein_npz: Optional[str] = None,
         protein_eff_key: str = "prot_eff",
-        go_normalize: bool = True,
-        go_uppercase: bool = True,
     ):
         # --------- Report the inputs up front ---------
         print("\n[SequenceTowerDataset] constructing...")
         print(_fmt_path(meta_feather, "meta_feather"))
         print(_fmt_path(dna_npz, "dna_npz"))
-        print(_fmt_path(go_npz, "go_npz"))
         if protein_meta_feather or protein_npz:
             print(_fmt_path(protein_meta_feather, "protein_meta_feather"))
             print(_fmt_path(protein_npz, "protein_npz"))
@@ -99,23 +94,8 @@ class SequenceTowerDataset(Dataset):
                 f"(min={self.emb_rows.min()}, max={self.emb_rows.max()})"
             )
 
-        # ---- GO embeddings ----
-        try:
-            self.go = GeneGOEmbeddings(
-                go_npz, normalize=go_normalize, uppercase_keys=go_uppercase
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load GO embeddings from '{go_npz}': {e}"
-            ) from e
-
         self.D_eff = D_eff
         self.dna_dim = D_eff
-        self.D_go = int(self.go.dim)
-        self.go_dim = self.D_go
-        print(
-            f"[GO] dim={self.D_go}  entries={len(self.go.name2idx) if hasattr(self.go, 'name2idx') else 'unknown'}"
-        )
 
         # ---- labels ----
         self.make_label = make_label
@@ -123,16 +103,6 @@ class SequenceTowerDataset(Dataset):
         if self.make_label and self.label_col not in self.meta.columns:
             raise KeyError(f"Label column '{self.label_col}' not found in meta.")
 
-        # quick GO hit-rate
-        genes_series = self.meta.get("GeneSymbol", pd.Series([""] * n_rows))
-        genes = genes_series.astype(str).str.upper().tolist()
-        go_hits = sum(g in getattr(self.go, "name2idx", {}) for g in genes)
-        self.go_hits = go_hits / max(1, len(genes))
-        self.go_hit_rate = self.go_hits
-        print(
-            f"[GO] hit-rate: {self.go_hits:.3f} "
-            f"(found {int(self.go_hits * len(genes))}/{len(genes)})"
-        )
 
         self.prot_eff = None
         self.D_prot = 0
@@ -216,13 +186,12 @@ class SequenceTowerDataset(Dataset):
             self.protein_coverage = 0.0
 
         # Final layout summary
-        total_D = self.D_eff + self.D_go + (self.D_prot or 0)
+        total_D = self.D_eff + (self.D_prot or 0)
         self.protein_dim = self.D_prot or 0
         self.dna_dim = self.D_eff
-        self.go_dim = self.D_go
         print(
             f"[SequenceTowerDataset] feature layout: "
-            f"dna={self.D_eff}  go={self.D_go}  prot={self.D_prot}  total={total_D}\n"
+            f"dna={self.D_eff}  prot={self.D_prot}  total={total_D}\n"
         )
 
     def __len__(self) -> int:
@@ -237,15 +206,7 @@ class SequenceTowerDataset(Dataset):
 
         # DNA eff (always present)
         eff_np = np.asarray(self.dna_eff[r], dtype="float32", order="C")  # (D_eff,)
-
-        # GO vec (fallback to zeros if missing)
-        go_vec = self.go.get(gene)
-        if go_vec is None:
-            go_np = np.zeros((self.D_go,), dtype="float32")
-        else:
-            go_np = np.asarray(go_vec, dtype="float32", order="C")
-
-        parts = [eff_np, go_np]
+        parts = [eff_np]
 
         # Protein eff (zeros if not aligned)
         if self.prot_eff is not None and self._prot_rows is not None:
