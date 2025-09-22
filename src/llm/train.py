@@ -66,7 +66,7 @@ class CondTrainer(Trainer):
             if got != exp:
                 raise RuntimeError(
                     f"[CondTrainer] cond_vec dim mismatch: got {got}, expected {exp}. "
-                    "Check D_eff/D_go/D_prot in dataset vs projector build."
+                    "Check D_eff/D_prot in dataset vs projector build."
                 )
 
         # default attention mask if missing
@@ -286,10 +286,9 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
 
     # Compute *true* conditioning dim from dataset (includes protein if present)
     D_eff = int(seq_ds["train"].D_eff)
-    D_go = int(seq_ds["train"].D_go)
     D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-    D_cond = D_eff + D_go + D_prot
-    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})")
+    D_cond = D_eff + D_prot
+    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
 
     # build model with matching projector input
     tok, base_model, projector = build_qwen_with_lora(cfg, D_cond)
