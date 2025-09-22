@@ -27,17 +27,18 @@ def load_finetuned_model(
     projector_path: str,
 ):
     """
-    Load tokenizer, 4-bit base model + LoRA adapter, and the CondProjector.
+    Load tokenizer, 4-bit base model + LoRA adapter, and the CondProjector
+    (new architecture with backbone/to_tokens/aux_head).
 
-    Assumptions (no backward compatibility):
-      - Projector state dict contains keys from the architecture:
-          - 'norm.*'
-          - 'fc.0.weight' (Linear: [hidden*k, D_cond])
-          - 'fc.0.bias'
-          - 'fc.3.weight' (second Linear)
+    Assumptions:
+      - Projector checkpoint contains:
+          - 'backbone.1.weight'  (Linear: [k*d_out, D_cond])
+          - 'backbone.1.bias'
+          - 'backbone.4.weight'  (second Linear)
+          - 'to_tokens.*'        (ViewTokens has no params; TokenAffine.*; GlobalGain.gain)
           - 'aux_head.*'
-          - 'gain'
-      - We infer k and validate D_cond from 'fc.0.weight'.
+      - d_out == model.config.hidden_size
+      - k is inferred from out_features / hidden_size
     """
     if not os.path.isdir(adapter_dir):
         raise FileNotFoundError(f"[LOAD] Adapter directory not found: {adapter_dir}")
@@ -71,21 +72,24 @@ def load_finetuned_model(
 
     # ----- Inspect projector checkpoint  -----
     state = torch.load(projector_path, map_location="cpu")
-    if "fc.0.weight" not in state:
+
+    # New projector: backbone = [LayerNorm(0), Linear(1), GELU(2), Dropout(3), Linear(4)]
+    key_w = "backbone.1.weight"
+    if key_w not in state:
         raise KeyError(
-            "[LOAD] Expected projector checkpoint with 'fc.0.weight' "
-            "(Linear from D_cond -> hidden*k)."
+            "[LOAD] Expected projector checkpoint with 'backbone.1.weight' "
+            "(Linear from D_cond -> k*d_out)."
         )
 
-    W = state["fc.0.weight"]  # shape: [hidden*k, D_cond_saved]
+    W = state[key_w]  # shape: [k*d_out, D_cond_saved]
     if W.ndim != 2:
-        raise ValueError(f"[LOAD] fc.0.weight has ndim={W.ndim}, expected 2.")
+        raise ValueError(f"[LOAD] {key_w} has ndim={W.ndim}, expected 2.")
     out_features, D_cond_saved = int(W.shape[0]), int(W.shape[1])
 
     hidden = int(model.config.hidden_size)
     if out_features % hidden != 0:
         raise ValueError(
-            "[LOAD] fc.0.out_features not divisible by model hidden size:\n"
+            "[LOAD] backbone.1.out_features not divisible by model hidden size:\n"
             f"        out_features={out_features}, hidden_size={hidden}\n"
             "        Cannot infer k (n_cond_tokens)."
         )
@@ -96,7 +100,7 @@ def load_finetuned_model(
             "[LOAD] D_cond mismatch:\n"
             f"        Provided D_cond={D_cond}\n"
             f"        Saved projector expects D_cond={D_cond_saved}\n"
-            "        Pass the correct D_cond (e.g., D_eff + D_go + D_prot)."
+            "        Pass the correct D_cond (e.g., D_eff + D_prot)."
         )
 
     print(
@@ -105,14 +109,14 @@ def load_finetuned_model(
 
     # ----- Rebuild projector and load weights strictly -----
     emb = model.get_input_embeddings().weight
-    projector = CondProjector(D_cond_saved, hidden, k=k_saved).to(
+    projector = CondProjector(d_in=D_cond_saved, d_out=hidden, k=k_saved).to(
         device=emb.device, dtype=emb.dtype
     )
     model.add_module("cond_projector", projector)
 
     missing, unexpected = model.cond_projector.load_state_dict(state, strict=True)
     if missing or unexpected:
-        # strict=True should fail before this, but keep guard
+        # strict=True should error before this point, but keep guard
         raise RuntimeError(
             f"[LOAD] Projector state mismatch. Missing={missing} Unexpected={unexpected}"
         )

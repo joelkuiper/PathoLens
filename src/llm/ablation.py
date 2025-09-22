@@ -118,7 +118,7 @@ class _TransformedSplit:
     """
     Read-through view that transforms the conditioning vector per item.
     Returns a CPU torch.Tensor so downstream `.numpy()` continues to work.
-    Forwards attributes to the underlying split (including meta/D_eff/D_go/D_prot).
+    Forwards attributes to the underlying split (including meta/D_eff/D_prot).
     """
 
     def __init__(self, base_split, cfg: _CondTransformCfg):

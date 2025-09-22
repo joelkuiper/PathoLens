@@ -319,10 +319,9 @@ def evaluate_split_batched(
     projector_path = os.path.join(out_dir, "projector.pt")
 
     D_eff = int(seq_ds["train"].D_eff)
-    D_go = int(seq_ds["train"].D_go)
     D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-    D_cond = D_eff + D_go + D_prot
-    print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})")
+    D_cond = D_eff + D_prot
+    print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
 
     tok, model = load_finetuned_model(model_id, D_cond, adapter_dir, projector_path)
     enable_fast_generate(model, tok)
@@ -446,7 +445,6 @@ def evaluate_split_batched(
     # Metrics
     acc = float(np.mean(np.array(y_pred) == np.array(y_true))) if y_true else 0.0
     p, r, f1 = torchmetrics_safe_prf(y_true, y_pred)
-
 
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
     report = classification_report(
