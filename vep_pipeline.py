@@ -10,7 +10,6 @@ Optional but helpful:
   GeneSymbol, hgvsc, hgvsp  (for filtering)
 
 It will:
-  * (optionally) filter to patchable/protein-changing categories from HGVSp
   * write chunk VCFs
   * run VEP in Docker (JSON + ProteinSeqs FASTAs)
   * parse & join JSON+FASTA into one tidy DataFrame
@@ -51,83 +50,6 @@ from src.pipeline.config import _norm_path, PipelineConfig, ConfigError
 
 SplitDict = Dict[str, pd.DataFrame]
 PathDict = Dict[str, Path]
-
-
-# ---------------------------
-# Category classifier (HGVSp)
-# ---------------------------
-
-
-def is_nonsense(val: str) -> bool:
-    if not isinstance(val, str) or not val.startswith("p."):
-        return False
-    s = val[2:]
-    return (
-        ("*" in s and "fs" not in s)
-        or bool(re.search(r"[A-Z][a-z]{2}\d+(Ter|X)$", s))
-        or bool(re.search(r"[A-Z]\d+\*$", s))
-    )
-
-
-def classify_hgvsp_series(hgvsp: pd.Series) -> pd.Series:
-    out = []
-    for v in hgvsp.fillna(""):
-        if v == "":
-            out.append("no_protein_info")
-        elif v.strip() == "p.?":
-            out.append("uncertain_pdot")
-        elif "=" in v:
-            out.append("synonymous")
-        elif "fs" in v.lower():
-            out.append("frameshift")
-        elif "delins" in v.lower():
-            out.append("inframe_delins")
-        elif "dup" in v:
-            out.append("inframe_duplication")
-        elif "del" in v:
-            out.append("inframe_deletion")
-        elif "ins" in v:
-            out.append("inframe_insertion")
-        elif is_nonsense(v):
-            out.append("nonsense")
-        elif v.startswith("p."):
-            out.append("missense")
-        else:
-            out.append("other")
-    return pd.Series(out, index=hgvsp.index)
-
-
-def apply_filter_mode(df: pd.DataFrame, mode: str) -> pd.DataFrame:
-    if "hgvsp" not in df.columns:
-        return df
-    cats = classify_hgvsp_series(df["hgvsp"])
-    if mode == "all":
-        return df
-    elif mode == "hgvsp_present":
-        return df[cats.ne("no_protein_info")]
-    elif mode == "patchable":  # missense + nonsense + in-frame (del/ins/dup/delins)
-        keep = {
-            "missense",
-            "nonsense",
-            "inframe_deletion",
-            "inframe_insertion",
-            "inframe_duplication",
-            "inframe_delins",
-        }
-        return df[cats.isin(keep)]
-    elif mode == "protein_changing":  # missense, nonsense, frameshift, in-frame
-        keep = {
-            "missense",
-            "nonsense",
-            "frameshift",
-            "inframe_deletion",
-            "inframe_insertion",
-            "inframe_duplication",
-            "inframe_delins",
-        }
-        return df[cats.isin(keep)]
-    else:
-        return df
 
 
 # ---------------------------
@@ -440,7 +362,6 @@ def run_vep_pipeline(
     out_dir: Path,
     *,
     image: str = "ensemblorg/ensembl-vep",
-    filter_mode: str = "all",
     chunk_size: int = 1000,
     jobs: int = 4,
     vep_fork: int = 2,
@@ -479,11 +400,6 @@ def run_vep_pipeline(
     if limit and limit > 0:
         df = df.iloc[:limit].copy()
 
-    if filter_mode != "all":
-        before = len(df)
-        df = apply_filter_mode(df, filter_mode)
-        print(f"[filter] {filter_mode} kept {len(df):,}/{before:,}")
-
     ensure_proteinseqs(host_cache_dir, image)
 
     # Shard
@@ -504,7 +420,6 @@ def run_vep_pipeline(
         job_args.append(
             (idx, cdf, work_dir, host_cache_dir, fasta_relpath, image, vep_fork)
         )
-
 
     with ThreadPool(processes=jobs) as pool:
         dfs = list(pool.imap_unordered(run_chunk, job_args))
@@ -691,7 +606,6 @@ def ensure_vep_annotations(
                 fasta_relpath=str(fasta_rel),
                 out_dir=vep_dir,
                 image=protein_cfg.image,
-                filter_mode=protein_cfg.filter_mode,
                 chunk_size=protein_cfg.chunk_size,
                 jobs=protein_cfg.jobs,
                 vep_fork=protein_cfg.vep_fork,
@@ -721,7 +635,9 @@ def ensure_vep_annotations(
         if drop_cols:
             merged = merged.drop(columns=drop_cols)
         merged["_vid_str"] = merged["VariationID"].astype(str)
-        merged = merged.merge(ann.drop(columns=["VariationID"]), on="_vid_str", how="left")
+        merged = merged.merge(
+            ann.drop(columns=["VariationID"]), on="_vid_str", how="left"
+        )
         merged = merged.drop(columns=["_vid_str"])
 
         for col in str_cols:
@@ -778,7 +694,6 @@ def main():
         args.fasta,
         _norm_path(args.out_dir),
         image=args.image,
-        filter_mode=args.filter,
         chunk_size=args.chunk_size,
         jobs=args.jobs,
         vep_fork=args.vep_fork,
