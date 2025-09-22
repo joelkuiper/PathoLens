@@ -74,6 +74,9 @@ prompt_dropout_prob = 0.3
 # Location for the manifest JSON that summarises caches
 manifest = "../artifacts/pipeline_manifest.json"
 write_manifest = true
+# Filter ClinVar variants by VEP most_severe_consequence before caching (optional)
+# filter_most_severe_consequence = ["stop_gained", "missense_variant"]
+filter_most_severe_consequence = ["missense_variant"]
 force_splits = false
 force_dna_windows = false
 force_dna_embeddings = false

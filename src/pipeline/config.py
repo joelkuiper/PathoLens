@@ -135,6 +135,7 @@ class RunConfig:
     device: Optional[str] = None
     write_manifest: bool = True
     manifest_path: Optional[Path] = None
+    filter_most_severe_consequence: Optional[tuple[str, ...]] = None
     force_splits: bool = False
     force_dna_windows: bool = False
     force_dna_embeddings: bool = False
@@ -240,17 +241,50 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
 
     run_raw = _section(raw, "Run")
     run_manifest = run_raw.get("manifest") or run_raw.get("manifest_path")
+
+    filter_raw = run_raw.get("filter_most_severe_consequence")
+    filter_values: Optional[tuple[str, ...]]
+    if filter_raw is None:
+        filter_values = None
+    else:
+        if isinstance(filter_raw, str):
+            raw_values = [filter_raw]
+        elif isinstance(filter_raw, (list, tuple)):
+            raw_values = list(filter_raw)
+        else:
+            raise ConfigError(
+                "Run.filter_most_severe_consequence must be a string or an array of strings"
+            )
+
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in raw_values:
+            if not isinstance(item, str):
+                raise ConfigError(
+                    "Run.filter_most_severe_consequence entries must all be strings"
+                )
+            value = item.strip()
+            if not value:
+                raise ConfigError(
+                    "Run.filter_most_severe_consequence entries cannot be empty"
+                )
+            if value not in seen:
+                cleaned.append(value)
+                seen.add(value)
+
+        filter_values = tuple(cleaned) if cleaned else None
+
+    run_kwargs = {
+        k: v
+        for k, v in run_raw.items()
+        if k not in {"manifest", "manifest_path", "filter_most_severe_consequence"}
+    }
     run = RunConfig(
-        **{
-            **{
-                k: v
-                for k, v in run_raw.items()
-                if k not in {"manifest", "manifest_path"}
-            },
-            "manifest_path": (
-                _norm_path(run_manifest, base) if run_manifest is not None else None
-            ),
-        }
+        **run_kwargs,
+        filter_most_severe_consequence=filter_values,
+        manifest_path=(
+            _norm_path(run_manifest, base) if run_manifest is not None else None
+        ),
     )
 
     cfg = PipelineConfig(

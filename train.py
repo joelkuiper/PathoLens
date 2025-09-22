@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Sequence, Tuple
 
 import pandas as pd
 
@@ -35,20 +35,30 @@ def _merge_artifacts(
     return combined
 
 
+def _format_consequence_values(consequences: Sequence[str]) -> str:
+    return ", ".join(f"'{value}'" for value in consequences)
+
+
 def _filter_splits_by_consequence(
     splits: Dict[str, pd.DataFrame],
     vep_tables: Dict[str, pd.DataFrame],
-    consequence: str,
+    consequences: Sequence[str],
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
+    if not consequences:
+        raise ValueError("At least one consequence value is required for filtering")
+
+    values_repr = _format_consequence_values(consequences)
     print(
-        "[filter] applying filter: most_severe_consequence =="
-        f" '{consequence}'"
+        "[filter] applying filter: most_severe_consequence in",
+        f" [{values_repr}]",
     )
 
     filtered_splits: Dict[str, pd.DataFrame] = {}
     filtered_tables: Dict[str, pd.DataFrame] = {
         split: table for split, table in vep_tables.items()
     }
+
+    allowed = {str(value) for value in consequences}
 
     for split, df in splits.items():
         if "most_severe_consequence" not in df.columns:
@@ -57,7 +67,7 @@ def _filter_splits_by_consequence(
             )
 
         col = df["most_severe_consequence"].astype("string")
-        mask = col.fillna("").eq(consequence)
+        mask = col.fillna("").isin(allowed)
         filtered_df = df[mask].reset_index(drop=True)
         dropped = len(df) - len(filtered_df)
         print(
@@ -78,8 +88,8 @@ def _filter_splits_by_consequence(
             )
             filtered_tables[split] = table
             continue
-        table_mask = table["most_severe_consequence"].astype("string").fillna("").eq(
-            consequence
+        table_mask = table["most_severe_consequence"].astype("string").fillna("").isin(
+            allowed
         )
         filtered_tables[split] = table[table_mask].reset_index(drop=True)
 
@@ -93,21 +103,34 @@ def _sanitize_consequence(value: str) -> str:
     return slug or "value"
 
 
+def _sanitize_consequence_key(values: Sequence[str]) -> str:
+    parts = [_sanitize_consequence(value) for value in values]
+    if not parts:
+        return "value"
+    return "+".join(parts)
+
+
 def _prepare_filtered_clinvar(
     cfg,
-    consequence: str,
+    consequences: Sequence[str],
 ) -> Tuple[
     Dict[str, pd.DataFrame],
     Dict[str, Path],
     Dict[str, Path],
     Dict[str, pd.DataFrame],
 ]:
-    slug = _sanitize_consequence(consequence)
+    if not consequences:
+        raise ValueError("At least one consequence value is required for filtering")
+
+    slug = _sanitize_consequence_key(consequences)
     filter_root = cfg.paths.artifacts / "filters" / f"most_severe_consequence={slug}"
     splits_dir = filter_root / "splits"
     vep_dir = filter_root / "vep"
     splits_dir.mkdir(parents=True, exist_ok=True)
     vep_dir.mkdir(parents=True, exist_ok=True)
+
+    values_repr = _format_consequence_values(consequences)
+    list_repr = f"[{values_repr}]"
 
     split_names = ("train", "val", "test")
     split_paths: Dict[str, Path] = {
@@ -126,7 +149,7 @@ def _prepare_filtered_clinvar(
     if reuse:
         print(
             "[filter] reusing cached filtered ClinVar splits for",
-            f"'{consequence}'",
+            list_repr,
         )
         splits = {name: pd.read_feather(path) for name, path in split_paths.items()}
         vep_tables = {
@@ -141,7 +164,7 @@ def _prepare_filtered_clinvar(
 
     print(
         "[filter] generating filtered ClinVar splits for",
-        f"most_severe_consequence='{consequence}'",
+        f"most_severe_consequence in {list_repr}",
     )
     full_df = load_clinvar_variants(str(cfg.paths.clinvar))
 
@@ -157,15 +180,15 @@ def _prepare_filtered_clinvar(
     )
 
     filtered_splits, filtered_tables = _filter_splits_by_consequence(
-        annotated_splits, full_tables, consequence
+        annotated_splits, full_tables, consequences
     )
     filtered_df = filtered_splits[full_split_name]
     filtered_table = filtered_tables[full_split_name]
 
     if filtered_df.empty:
         raise ValueError(
-            "ClinVar dataset contains no rows after applying consequence filter "
-            f"'{consequence}'"
+            "ClinVar dataset contains no rows after applying consequence filter set "
+            f"{list_repr}"
         )
 
     train_df, val_df, test_df = _split_by_gene(filtered_df)
@@ -208,13 +231,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the LLM fine-tuning stage",
     )
-    ap.add_argument(
-        "--filter-by",
-        help=(
-            "Filter ClinVar variants to the provided most_severe_consequence "
-            "value before building caches"
-        ),
-    )
     return ap.parse_args()
 
 
@@ -227,10 +243,16 @@ def main() -> None:
     print(f"[config] artifacts dir: {cfg.paths.artifacts}")
     print(f"[config] device: {device}")
 
+    filter_consequences = cfg.run.filter_most_severe_consequence
+    if isinstance(filter_consequences, str):
+        filter_consequences = (filter_consequences,)
+    elif filter_consequences is not None:
+        filter_consequences = tuple(filter_consequences)
+
     # ----- ClinVar splits + VEP annotations -----
-    if args.filter_by:
+    if filter_consequences:
         splits, split_paths, vep_paths, vep_tables = _prepare_filtered_clinvar(
-            cfg, args.filter_by
+            cfg, filter_consequences
         )
     else:
         splits, split_paths = prepare_clinvar_splits(cfg)
@@ -254,8 +276,12 @@ def main() -> None:
     # ----- Manifest -----
     manifest_splits = _merge_artifacts(dna_artifacts, protein_artifacts)
     manifest_extras = {"config": str(Path(args.config).resolve())}
-    if args.filter_by:
-        manifest_extras["filter_by"] = args.filter_by
+    if filter_consequences:
+        manifest_extras["filter_by"] = (
+            filter_consequences[0]
+            if len(filter_consequences) == 1
+            else list(filter_consequences)
+        )
     manifest = PipelineManifest(
         go_npz=str(cfg.go.npz),
         splits=manifest_splits,
