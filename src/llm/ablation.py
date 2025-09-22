@@ -274,7 +274,7 @@ def run_prompt_vs_cond_ablation(
     noise_std: Optional[float] = 1.5,  # strong absolute sigma by default
     noise_alpha: float = 0.0,  # ignored when noise_std is set
     do_permute: bool = True,
-    scale_sweep: Sequence[float] = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0),
+    scale_sweep: Sequence[float] = (0.0, 0.25, 0.5, 1.0),
     do_pure_noise: bool = True,
 ) -> Dict[str, dict]:
     """

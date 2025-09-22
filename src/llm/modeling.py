@@ -6,6 +6,9 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
+import torch
+import torch.nn as nn
+
 
 class CondProjector(nn.Module):
     """
@@ -14,27 +17,75 @@ class CondProjector(nn.Module):
     """
 
     def __init__(
-        self, d_in: int, d_out: int, k: int = 8, n_classes: int = 2, p_drop: float = 0.1
+        self,
+        d_in: int,
+        d_out: int,
+        k: int = 8,
+        n_classes: int = 2,
+        p_drop: float = 0.10,
+        eps: float = 1e-6,
     ):
         super().__init__()
         self.k = k
-        self.norm = nn.LayerNorm(d_in)
-        self.fc = nn.Sequential(
-            nn.Linear(d_in, d_out * k),
-            nn.GELU(),
-            nn.Dropout(p_drop),
-            nn.Linear(d_out * k, d_out * k),
-        )
+        self.h = d_out
+        self.eps = eps
+
+        # Pre-normalize the conditioning vector
+        self.norm_in = nn.LayerNorm(d_in)
+
+        # 2-layer MLP projector
+        self.fc1 = nn.Linear(d_in, d_out * k, bias=True)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(p_drop)
+        self.fc2 = nn.Linear(d_out * k, d_out * k, bias=True)
+
+        # Per-token affine after RMS centering (broadcast across hidden dim)
+        self.gamma = nn.Parameter(torch.ones(k))  # multiplicative
+        self.beta = nn.Parameter(torch.zeros(k))  # additive
+        self.global_gain = nn.Parameter(torch.tensor(1.0))  # overall scalar
+
+        # Aux head stays on the flattened token block
         self.aux_head = nn.Linear(d_out * k, n_classes)
-        self.gain = nn.Parameter(torch.ones(1))
+
+        self._init_weights()
+
+    def _init_weights(self):
+        # Kaiming for the first layer
+        nn.init.kaiming_uniform_(self.fc1.weight, a=0.0, nonlinearity="gelu")
+        nn.init.zeros_(self.fc1.bias)
+
+        # Small init on the second layer so outputs start near 0 (stable)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+        # Aux head starts small too
+        nn.init.zeros_(self.aux_head.weight)
+        nn.init.zeros_(self.aux_head.bias)
+
+        # gamma=1, beta=0, global_gain=1 already set
+
+    def _rms_center(self, T: torch.Tensor) -> torch.Tensor:
+        # T: [B, k, H] -> zero-mean + unit-RMS per token
+        T = T - T.mean(dim=-1, keepdim=True)
+        rms = torch.sqrt(T.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return T / rms
 
     def forward(self, x: torch.Tensor):
         # x: [B, d_in]
-        x = self.norm(x)
-        y = self.fc(x)  # [B, k*d_out]
-        cond_tokens = self.gain * y.view(x.size(0), self.k, -1)
+        B = x.size(0)
+        x = self.norm_in(x)
+
+        y = self.fc2(self.drop(self.act(self.fc1(x))))  # [B, k*H]
         aux_logits = self.aux_head(y)  # [B, n_classes]
-        return cond_tokens, aux_logits
+
+        T = y.view(B, self.k, self.h)  # [B, k, H]
+        T = self._rms_center(T)  # per-token normalize
+
+        # Per-token affine + global gain (no external stats required)
+        T = T * self.gamma.view(1, self.k, 1) + self.beta.view(1, self.k, 1)
+        T = self.global_gain * T
+
+        return T, aux_logits
 
 
 def build_qwen_with_lora(cfg, D_cond: int):
