@@ -41,8 +41,6 @@ The final signal is the **normalized effect vector** `dna_eff = normalize(embed(
 For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s protein language model). Using Ensembl VEP with the ProteinSeqs plugin, we extract both the wild-type and mutated protein sequences for each ClinVar variant. These sequences are embedded with ESM-2, and we compute a delta representation that captures the local effect of the mutation on the protein context. This embedding encodes biochemical and structural information (such as residue conservation, substitution severity, and domain context) that goes beyond simple VEP consequence labels. The resulting protein effect vectors are concatenated with DNA effect to form the conditioning input to our projector, which maps them into virtual tokens that the LLM consumes alongside the variant prompt.
 
 ### LLM fine-tuning
-Good call—here’s the same blurb with the **aux head** described too:
-
 The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (LayerNorm → Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are **prepended** to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
 
 Alongside the tokens, the projector exposes a small **auxiliary classification head**: a single Linear over the flattened projection (`k*d_out → n_classes`). During training we combine the aux-head cross-entropy with the main LM loss (on the label word) using a modest weight. This gives the projector a direct discriminative signal, stabilizes early training, and encourages the projected tokens to be informative. The aux head is **only** a training aid; at inference we ignore it and score purely from the LM by comparing the log-likelihoods of the two label tokens (“Benign” vs “Pathogenic”).
@@ -106,7 +104,15 @@ An earlier version ([3b65d2a](https://github.com/joelkuiper/PathoLens/commit/3b6
 These results show that whilst the model is able to learn the separation between benign and pathogenic, it seems to do this almost exclusively on the prompt (only a small lift in prompt+cond from the ablation probe).
 
 #### LLM missense only
-Focusing on `most_severe_consequence=missense_variant` from VEP we obtain the following results.
+Focusing on `most_severe_consequence = missense_variant` from VEP we obtain the following results. We emphasize missense variants because they are biologically and clinically the hardest class:
+
+* **Sheer prevalence** missense substitutions are the single most common type of coding variant in ClinVar and in human genomes.
+* **Ambiguous functional effect**  unlike loss-of-function (nonsense, frameshift, canonical splice) variants, which often have predictable outcomes, missense changes can be benign or highly pathogenic depending on subtle context (conservation, domain, structure, biochemical compatibility).
+* **Limited prompt signal** the HGVS protein notation (e.g. `p.Gly12Asp`) alone does not convey whether the substitution is harmful. Models trained only on text struggle here, tending towards random or majority-class behavior.
+
+By concentrating evaluation on missense variants, we test whether the conditioning path (DNA + protein effect vectors projected into virtual tokens) actually provides *non-trivial discriminative signal*. A lift on this subset is strong evidence that the model is not just memorizing textual heuristics but genuinely leveraging the embeddings.
+
+
 
 **Classification report (Test)**
 |                | precision | recall | f1-score | support |
