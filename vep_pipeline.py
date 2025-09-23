@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VEP-in-Docker pipeline for ClinVar-like DataFrames
---------------------------------------------------
+VEP pipeline for ClinVar-like DataFrames
+----------------------------------------
 
 Input DF must have (at minimum):
   VariationID, ChromosomeAccession, PositionVCF, ReferenceAlleleVCF, AlternateAlleleVCF
@@ -11,15 +11,15 @@ Optional but helpful:
 
 It will:
   * write chunk VCFs
-  * run VEP in Docker (JSON + ProteinSeqs FASTAs)
+  * run VEP either via Docker or a local binary (JSON + ProteinSeqs FASTAs)
   * parse & join JSON+FASTA into one tidy DataFrame
   * write combined Feather
 
 Requirements on the host:
-  * Docker available
+  * Docker available (default mode) or a local VEP installation on the PATH
   * You already have a VEP cache + FASTA under <host_cache_dir> (mounted to /opt/vep/.vep)
     e.g. /your/path/vep_cache/homo_sapiens/115_GRCh38/...
-  * ProteinSeqs.pm is present in <host_cache_dir>/Plugins  (script can ensure/install)
+  * ProteinSeqs.pm is present in <host_cache_dir>/Plugins (auto-installed when using Docker)
   * Python: pandas, pyarrow, biopython
 
 Example:
@@ -154,11 +154,25 @@ def write_vcf(df: pd.DataFrame, out_vcf: Path) -> None:
 # ---------------------------
 
 
-def ensure_proteinseqs(host_cache_dir: Path, image: str) -> None:
-    """Ensure ProteinSeqs.pm exists under cache Plugins by invoking INSTALL.pl inside the container."""
+def ensure_proteinseqs(
+    host_cache_dir: Path, image: str, *, use_docker: bool = True
+) -> None:
+    """Ensure ProteinSeqs.pm exists under cache Plugins.
+
+    When ``use_docker`` is ``True`` the helper will attempt to install the plugin by
+    invoking ``INSTALL.pl`` inside the VEP Docker image. For local executions the
+    plugin must already be present on disk and a helpful error is raised if it is
+    missing.
+    """
     plugin_path = host_cache_dir / "Plugins" / "ProteinSeqs.pm"
     if plugin_path.exists():
         return
+    if not use_docker:
+        raise RuntimeError(
+            "ProteinSeqs.pm not found under the VEP cache Plugins directory. "
+            "Install the plugin manually before running without Docker: "
+            f"{plugin_path}"
+        )
     # run as host user to avoid permission mismatches
     uid = os.getuid()
     gid = os.getgid()
@@ -248,6 +262,66 @@ def run_vep_docker(
     return out_json, out_wt, out_mt
 
 
+def run_vep_local(
+    vcf_path: Path,
+    out_prefix: Path,
+    host_cache_dir: Path,
+    fasta_relpath: str,
+    *,
+    vep_fork: int = 2,
+    pick_order: str = "mane_select,canonical,appris,ccds,rank,tsl,length",
+) -> Tuple[Path, Path, Path]:
+    """Run VEP locally assuming ``vep`` is available on the ``PATH``."""
+
+    out_json = out_prefix.with_suffix(".json")
+    out_wt = out_prefix.with_suffix(".wt.fa")
+    out_mt = out_prefix.with_suffix(".mut.fa")
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+
+    fasta_path = host_cache_dir / Path(fasta_relpath)
+
+    cmd = [
+        "vep",
+        "--format",
+        "vcf",
+        "--input_file",
+        str(vcf_path),
+        "--output_file",
+        str(out_json),
+        "--species",
+        "homo_sapiens",
+        "--assembly",
+        "GRCh38",
+        "--cache",
+        "--offline",
+        "--dir_cache",
+        str(host_cache_dir),
+        "--fasta",
+        str(fasta_path),
+        "--symbol",
+        "--protein",
+        "--uniprot",
+        "--hgvs",
+        "--mane",
+        "--pick",
+        "--pick_order",
+        pick_order,
+        "--dir_plugins",
+        str(host_cache_dir / "Plugins"),
+        "--plugin",
+        f"ProteinSeqs,{out_wt},{out_mt}",
+        "--json",
+        "--no_stats",
+        "--force_overwrite",
+        "--fork",
+        str(vep_fork),
+    ]
+    print("[vep-local]", " ".join(cmd[:10]), "...")
+    subprocess.run(cmd, check=True)
+    return out_json, out_wt, out_mt
+
+
 # ---------------------------
 # JSON parser + joiner
 # ---------------------------
@@ -331,21 +405,37 @@ def join_json_and_fastas(
 
 
 def run_chunk(args) -> pd.DataFrame:
-    (chunk_id, df_chunk, work_dir, host_cache_dir, fasta_relpath, image, vep_fork) = (
-        args
-    )
+    (
+        chunk_id,
+        df_chunk,
+        work_dir,
+        host_cache_dir,
+        fasta_relpath,
+        image,
+        vep_fork,
+        use_docker,
+    ) = args
     out_dir = work_dir / f"chunk_{chunk_id:05d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     vcf_path = out_dir / "input.vcf"
     write_vcf(df_chunk, vcf_path)
-    json_path, wt_path, mt_path = run_vep_docker(
-        vcf_path,
-        out_dir / "vep_out",
-        host_cache_dir,
-        fasta_relpath,
-        image,
-        vep_fork=vep_fork,
-    )
+    if use_docker:
+        json_path, wt_path, mt_path = run_vep_docker(
+            vcf_path,
+            out_dir / "vep_out",
+            host_cache_dir,
+            fasta_relpath,
+            image,
+            vep_fork=vep_fork,
+        )
+    else:
+        json_path, wt_path, mt_path = run_vep_local(
+            vcf_path,
+            out_dir / "vep_out",
+            host_cache_dir,
+            fasta_relpath,
+            vep_fork=vep_fork,
+        )
     df_json = parse_vep_json(json_path)
     joined = join_json_and_fastas(df_json, wt_path, mt_path)
     # keep original ID/coords if present
@@ -362,6 +452,7 @@ def run_vep_pipeline(
     out_dir: Path,
     *,
     image: str = "ensemblorg/ensembl-vep",
+    use_docker: bool = True,
     chunk_size: int = 1000,
     jobs: int = 4,
     vep_fork: int = 2,
@@ -400,7 +491,7 @@ def run_vep_pipeline(
     if limit and limit > 0:
         df = df.iloc[:limit].copy()
 
-    ensure_proteinseqs(host_cache_dir, image)
+    ensure_proteinseqs(host_cache_dir, image, use_docker=use_docker)
 
     # Shard
     chunks: list[pd.DataFrame] = [
@@ -418,7 +509,16 @@ def run_vep_pipeline(
         need = set(VCF_COLS + ["GeneSymbol", "hgvsc", "hgvsp", "ClinicalSignificance"])
         cdf = cdf[[col for col in cdf.columns if col in need]].copy()
         job_args.append(
-            (idx, cdf, work_dir, host_cache_dir, fasta_relpath, image, vep_fork)
+            (
+                idx,
+                cdf,
+                work_dir,
+                host_cache_dir,
+                fasta_relpath,
+                image,
+                vep_fork,
+                use_docker,
+            )
         )
 
     with ThreadPool(processes=jobs) as pool:
@@ -606,6 +706,7 @@ def ensure_vep_annotations(
                 fasta_relpath=str(fasta_rel),
                 out_dir=vep_dir,
                 image=protein_cfg.image,
+                use_docker=protein_cfg.use_docker,
                 chunk_size=protein_cfg.chunk_size,
                 jobs=protein_cfg.jobs,
                 vep_fork=protein_cfg.vep_fork,
@@ -661,7 +762,7 @@ def ensure_vep_annotations(
 def main():
 
     ap = argparse.ArgumentParser(
-        description="Run VEP-in-Docker on a ClinVar-like DataFrame"
+        description="Run VEP on a ClinVar-like DataFrame using Docker or a local binary"
     )
     ap.add_argument(
         "--input", required=True, help="Path to input DF (feather/parquet/csv)"
@@ -676,6 +777,13 @@ def main():
     ap.add_argument(
         "--image", default="ensemblorg/ensembl-vep", help="Docker image for VEP"
     )
+    ap.add_argument(
+        "--no_docker",
+        dest="use_docker",
+        action="store_false",
+        help="Run VEP directly from the PATH instead of using Docker",
+    )
+    ap.set_defaults(use_docker=True)
     ap.add_argument(
         "--filter",
         default="all",
@@ -694,6 +802,7 @@ def main():
         args.fasta,
         _norm_path(args.out_dir),
         image=args.image,
+        use_docker=args.use_docker,
         chunk_size=args.chunk_size,
         jobs=args.jobs,
         vep_fork=args.vep_fork,

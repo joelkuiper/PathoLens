@@ -123,6 +123,7 @@ def build_protein_caches(
                     fasta_relpath=str(cfg.protein.vep_fasta_relpath),
                     out_dir=vep_dir,
                     image=cfg.protein.image,
+                    use_docker=cfg.protein.use_docker,
                     filter_mode=cfg.protein.filter_mode,
                     chunk_size=cfg.protein.chunk_size,
                     jobs=cfg.protein.jobs,

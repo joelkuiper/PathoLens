@@ -84,6 +84,7 @@ class ProteinConfig:
     vep_cache_dir: Optional[Path] = None
     vep_fasta_relpath: Optional[str] = None
     image: str = "ensemblorg/ensembl-vep"
+    use_docker: bool = True
     filter_mode: str = "protein_changing"
     chunk_size: int = 1000
     jobs: int = 6

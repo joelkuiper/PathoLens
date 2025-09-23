@@ -29,6 +29,8 @@ pool = "mean"
 vep_cache_dir = "~/vep_cache"
 vep_fasta_relpath = "homo_sapiens/115_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
 image = "ensemblorg/ensembl-vep"
+# Set to false to run a local VEP installation instead of Docker
+use_docker = true
 chunk_size = 2500
 jobs = 18
 vep_fork = 0
