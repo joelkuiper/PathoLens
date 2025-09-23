@@ -39,6 +39,8 @@ The final signal is the **normalized effect vector** `dna_eff = normalize(embed(
 ### Protein embedding
 For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s protein language model). Using Ensembl VEP with the ProteinSeqs plugin, we extract both the wild-type and mutated protein sequences for each ClinVar variant. These sequences are embedded with ESM-2, and we compute a delta representation after mean pooling that captures the local effect of the mutation on the protein context. This embedding encodes biochemical and structural information (such as residue conservation, substitution severity, and domain context) that goes beyond simple VEP consequence labels. The resulting protein effect vectors are concatenated with DNA effect to form the conditioning input to our projector, which maps them into virtual tokens that the LLM consumes alongside the variant prompt.
 
+By default the code attempts to run VEP through Docker (by pulling the image from the Docker registry). It is possible to use `vep` from the `$PATH` instead by setting the flag in the configuration TOML.
+
 ### LLM fine-tuning
 The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are **prepended** to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
 
