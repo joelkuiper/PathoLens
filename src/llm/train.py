@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -54,7 +54,7 @@ class CondTrainer(Trainer):
             self._aux_correct += int(correct)
             self._aux_total += batch
 
-    def log(self, logs: Dict[str, float]) -> None:  # type: ignore[override]
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         """Inject auxiliary head stats into the standard Trainer log output."""
         has_metrics = (self._aux_loss_count > 0) or (self._aux_total > 0)
         if has_metrics:
@@ -64,7 +64,7 @@ class CondTrainer(Trainer):
             if self._aux_total > 0:
                 logs["aux_acc"] = self._aux_correct / self._aux_total
                 logs["aux_support"] = float(self._aux_total)
-        super().log(logs)
+        super().log(logs, start_time)
         if has_metrics:
             self._reset_aux_metric_buffer()
 
