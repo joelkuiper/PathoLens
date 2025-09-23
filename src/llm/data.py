@@ -117,16 +117,31 @@ def make_collator(
         attn_mask = enc_full["attention_mask"]
         labels = input_ids.clone()
 
-        prompt_lens = enc_prompt["attention_mask"].sum(dim=1).tolist()
-        for i, p_len in enumerate(prompt_lens):
-            labels[i, : int(p_len)] = -100  # mask system+user
+        prompt_lens = [
+            int(x) for x in enc_prompt["attention_mask"].sum(dim=1).tolist()
+        ]
+        pad_lens = [
+            int(x)
+            for x in (input_ids.shape[1] - attn_mask.sum(dim=1)).tolist()
+        ]
+        label_starts = [pad + prompt for pad, prompt in zip(pad_lens, prompt_lens)]
+
+        pad_token_mask = attn_mask == 0
+        labels = labels.masked_fill(pad_token_mask, -100)
 
         # --- label token upweighting ---
         label_weights = torch.ones_like(labels, dtype=torch.float32)
-        for i, p_len in enumerate(prompt_lens):
-            label_weights[i, : int(p_len)] = 0.0  # no weight for prompt
+        label_weights = label_weights.masked_fill(pad_token_mask, 0.0)
+
+        for i, (prompt_len, prompt_start, label_start) in enumerate(
+            zip(prompt_lens, pad_lens, label_starts)
+        ):
+            prompt_end = label_start
+            labels[i, prompt_start:prompt_end] = -100  # mask system+user
+            label_weights[i, prompt_start:prompt_end] = 0.0  # no weight for prompt
+
             ids = input_ids[i].tolist()
-            start = int(p_len)
+            start = label_start
             jB = _find_subseq(ids, tok_B, start)
             jP = _find_subseq(ids, tok_P, start)
             j = jB if (jB != -1 and (jP == -1 or jB <= jP)) else jP
@@ -138,8 +153,7 @@ def make_collator(
         if mask_think and tok_TOPEN and tok_TCLOSE:
             ids_list = input_ids.tolist()
             for i, ids in enumerate(ids_list):
-                start = int(prompt_lens[i])  # only consider assistant region
-                seek_from = start
+                seek_from = label_starts[i]  # only consider assistant region
                 while True:
                     j = _find_subseq(ids, tok_TOPEN, seek_from)
                     if j == -1:
