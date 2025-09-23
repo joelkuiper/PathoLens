@@ -107,7 +107,7 @@ These results show that whilst the model is able to learn the separation between
 #### LLM missense only
 Focusing on `most_severe_consequence=missense_variant` from VEP we obtain the following results.
 
-### Classification report (Test)
+**Classification report (Test)**
 |                | precision | recall | f1-score | support |
 |----------------|-----------|--------|----------|---------|
 | **Benign**     | 0.877     | 0.876  | 0.877    | 3117    |
@@ -116,7 +116,7 @@ Focusing on `most_severe_consequence=missense_variant` from VEP we obtain the fo
 | **macro avg**  | 0.845     | 0.845  | 0.845    | 5170    |
 | **weighted avg** | 0.851   | 0.851  | 0.851    | 5170    |
 
-### Confusion Matrix (Test)
+**Confusion Matrix (Test)**
 
 |                     | Pred Benign | Pred Pathogenic |
 |---------------------|-------------|-----------------|
@@ -124,7 +124,7 @@ Focusing on `most_severe_consequence=missense_variant` from VEP we obtain the fo
 | **True Pathogenic** | 382         | 1671            |
 
 
-### Ablation test (Test)
+**Ablation test (Test)**
 | Mode           |    N |   Acc  |   F1   | ROC-AUC | PR-AUC |
 |----------------|------|--------|--------|---------|--------|
 | cond+prompt    | 5170 | 0.8507 | 0.8118 |  0.9224 | 0.8972 |
