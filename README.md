@@ -51,22 +51,16 @@ We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitt
 Results are reported on the held-out **test split** (N = 33,115 variants). Positive class = **Pathogenic**, negative class = **Benign**.
 
 ### Overall performance
-#### MLP probe
+#### MLP probe (Validation)
 
-| Mode      | Split | Thr  |  Acc  | BalAcc |   F1  | Prec  |  Rec  |  Spec |  ROC  |
-|-----------|-------|------|-------|--------|-------|-------|-------|-------|-------|
-| dna       | val   | 0.5  | 0.7613| 0.6557 | 0.4764| 0.5027| 0.4528| 0.8587| 0.7173|
-|           | val   | best | 0.7279| 0.6572 | 0.4788| 0.4428| 0.5213| 0.7931| 0.7173|
-| dna       | test  | 0.5  | 0.7713| 0.6532 | 0.4603| 0.4806| 0.4416| 0.8647| 0.7118|
-|           | test  | best | 0.7340| 0.6526 | 0.4569| 0.4160| 0.5066| 0.7985| 0.7118|
-| prot      | val   | 0.5  | 0.7446| 0.6323 | 0.4388| 0.4638| 0.4164| 0.8481| 0.6735|
-|           | val   | best | 0.7837| 0.6433 | 0.4530| 0.5754| 0.3735| 0.9131| 0.6735|
-| prot      | test  | 0.5  | 0.7947| 0.6752 | 0.4980| 0.5411| 0.4613| 0.8891| 0.7304|
-|           | test  | best | 0.8251| 0.6757 | 0.5076| 0.6707| 0.4083| 0.9432| 0.7304|
-| dna+prot  | val   | 0.5  | 0.7631| 0.7515 | 0.5962| 0.5042| 0.7293| 0.7737| 0.8291|
-|           | val   | best | 0.8319| 0.7578 | 0.6371| 0.6604| 0.6155| 0.9002| 0.8291|
-| dna+prot  | test  | 0.5  | 0.8160| 0.7954 | 0.6455| 0.5617| 0.7585| 0.8323| 0.8579|
-|           | test  | best | 0.8685| 0.7845 | 0.6804| 0.7342| 0.6340| 0.9350| 0.8579|
+| Mode      | Thr  |  Acc  | BalAcc |   F1  | Prec  |  Rec  |  Spec |  ROC  |
+|-----------|------|-------|--------|-------|-------|-------|-------|-------|
+| dna       | 0.5  | 0.7613| 0.6557 | 0.4764| 0.5027| 0.4528| 0.8587| 0.7173|
+|           | best | 0.7279| 0.6572 | 0.4788| 0.4428| 0.5213| 0.7931| 0.7173|
+| prot      | 0.5  | 0.7446| 0.6323 | 0.4388| 0.4638| 0.4164| 0.8481| 0.6735|
+|           | best | 0.7837| 0.6433 | 0.4530| 0.5754| 0.3735| 0.9131| 0.6735|
+| dna+prot  | 0.5  | 0.7631| 0.7515 | 0.5962| 0.5042| 0.7293| 0.7737| 0.8291|
+|           | best | 0.8319| 0.7578 | 0.6371| 0.6604| 0.6155| 0.9002| 0.8291|
 
 This table show the results of a 2-layer Multi Layer Perceptron (MLP) on the raw concatenated embedding space (without the LLM).
 See [mlp_test.py](./src/mlp_test.py). These results demonstrate that there is learnable signal in the embedding space, and that the concatenated vector outperforms each embedding space individually.
