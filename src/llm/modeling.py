@@ -49,7 +49,7 @@ class CondProjector(nn.Module):
 
         # (B, d_in) -> (B, k*d_out)
         self.backbone = nn.Sequential(
-            nn.LayerNorm(self.d_in),
+            nn.Identity(),
             nn.Linear(self.d_in, self.d_out * self.k),
             nn.GELU(),
             nn.Dropout(self.p_drop),

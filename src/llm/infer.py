@@ -22,7 +22,6 @@ def _build_prompt_inputs_embeds(
     enc = tokenizer([chat_str], return_tensors="pt").to(dev)
     txt_emb = model.get_input_embeddings()(enc["input_ids"])
     cond = cond_vec_np.astype("float32")
-    cond /= np.linalg.norm(cond) + 1e-6
     cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb.dtype)
     cond_emb, _ = model.cond_projector(cond)
     inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
@@ -195,7 +194,6 @@ def generate_label_then_rationale(
     txt_emb = model.get_input_embeddings()(enc["input_ids"])  # [1, T, H]
 
     cond = cond_vec_np.astype("float32")
-    cond /= np.linalg.norm(cond) + 1e-6
     cond = torch.from_numpy(cond).unsqueeze(0).to(dev, dtype=txt_emb.dtype)  # [1, D]
     cond_emb, _ = model.cond_projector(cond)  # [1, K, H]
 

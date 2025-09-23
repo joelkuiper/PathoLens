@@ -57,8 +57,6 @@ class CondTextDataset(Dataset):
 
         # Slice *exactly* the conditioning span
         cond = x[: self.D_cond]
-        # Safe L2 norm
-        cond /= (np.linalg.norm(cond) + 1e-6).astype("float32")
 
         meta_row = self.meta.iloc[i]
         prompt, target = row_to_example(meta_row)

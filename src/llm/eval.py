@@ -133,7 +133,6 @@ def _prep_inputs_embeds(
     txt_emb = E(enc["input_ids"])  # [B,T,H]
 
     cond = cond_vecs.astype("float32")
-    cond = cond / (np.linalg.norm(cond, axis=1, keepdims=True) + 1e-6)
     cond = torch.from_numpy(cond).to(dev, dtype=txt_emb.dtype)  # [B,D]
     cond_emb, _ = model.cond_projector(cond)  # [B,K,H]
 
@@ -236,7 +235,6 @@ def _generate_rationale_with_seed(
 
     # Cond embeddings
     v = cond_vec.astype("float32")
-    v /= np.linalg.norm(v) + 1e-6
     v = torch.from_numpy(v).unsqueeze(0).to(dev, dtype=txt_emb.dtype)  # [1,D]
     cond_emb, _ = model.cond_projector(v)  # [1,K,H]
 
