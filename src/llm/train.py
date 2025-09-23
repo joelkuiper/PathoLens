@@ -29,6 +29,44 @@ class CondTrainer(Trainer):
     def __init__(self, *args, train_sampler=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._custom_train_sampler = train_sampler
+        self._reset_aux_metric_buffer()
+
+    # ------------------------------------------------------------------
+    # Auxiliary head logging helpers
+    # ------------------------------------------------------------------
+    def _reset_aux_metric_buffer(self):
+        self._aux_loss_sum = 0.0
+        self._aux_loss_count = 0
+        self._aux_correct = 0
+        self._aux_total = 0
+
+    def _update_aux_metrics(
+        self, aux_loss: torch.Tensor, aux_logits: torch.Tensor, gold_y: torch.Tensor
+    ) -> None:
+        with torch.no_grad():
+            batch = int(gold_y.numel())
+            if batch == 0:
+                return
+            self._aux_loss_sum += float(aux_loss.detach()) * batch
+            self._aux_loss_count += batch
+            preds = aux_logits.detach().argmax(dim=-1)
+            correct = (preds == gold_y.detach()).sum().item()
+            self._aux_correct += int(correct)
+            self._aux_total += batch
+
+    def log(self, logs: Dict[str, float]) -> None:  # type: ignore[override]
+        """Inject auxiliary head stats into the standard Trainer log output."""
+        has_metrics = (self._aux_loss_count > 0) or (self._aux_total > 0)
+        if has_metrics:
+            logs = dict(logs)
+            if self._aux_loss_count > 0:
+                logs["aux_loss"] = self._aux_loss_sum / self._aux_loss_count
+            if self._aux_total > 0:
+                logs["aux_acc"] = self._aux_correct / self._aux_total
+                logs["aux_support"] = float(self._aux_total)
+        super().log(logs)
+        if has_metrics:
+            self._reset_aux_metric_buffer()
 
     def get_train_dataloader(self):
         if self.train_dataset is None:
@@ -200,6 +238,9 @@ class CondTrainer(Trainer):
             total_loss = lm_loss + lambda_aux * aux_loss
         else:
             total_loss = lm_loss
+
+        if model.training and aux_loss is not None:
+            self._update_aux_metrics(aux_loss, aux_logits, gold_y)
 
         return (total_loss, out) if return_outputs else total_loss
 
