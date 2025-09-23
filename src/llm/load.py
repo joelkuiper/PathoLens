@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os
-from pathlib import Path
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
@@ -27,18 +26,12 @@ def load_finetuned_model(
     projector_path: str,
 ):
     """
-    Load tokenizer, 4-bit base model + LoRA adapter, and the CondProjector
-    (new architecture with backbone/to_tokens/aux_head).
+    Load tokenizer, 4-bit base model + LoRA adapter, and the new minimal CondProjector.
 
-    Assumptions:
-      - Projector checkpoint contains:
-          - 'backbone.1.weight'  (Linear: [k*d_out, D_cond])
-          - 'backbone.1.bias'
-          - 'backbone.4.weight'  (second Linear)
-          - 'to_tokens.*'        (ViewTokens has no params; TokenAffine.*; GlobalGain.gain)
-          - 'aux_head.*'
+    Assumptions for the projector checkpoint (no backwards compatibility):
+      - 'backbone.1.weight' exists (Linear: [k*d_out, D_cond])
       - d_out == model.config.hidden_size
-      - k is inferred from out_features / hidden_size
+      - k = (out_features / hidden_size)
     """
     if not os.path.isdir(adapter_dir):
         raise FileNotFoundError(f"[LOAD] Adapter directory not found: {adapter_dir}")
@@ -73,8 +66,9 @@ def load_finetuned_model(
     # ----- Inspect projector checkpoint  -----
     state = torch.load(projector_path, map_location="cpu")
 
-    # New projector: backbone = [LayerNorm(0), Linear(1), GELU(2), Dropout(3), Linear(4)]
-    key_w = "backbone.1.weight"
+    key_w = (
+        "backbone.1.weight"  # LN(0) -> Linear(1) -> GELU(2) -> Dropout(3) -> Linear(4)
+    )
     if key_w not in state:
         raise KeyError(
             "[LOAD] Expected projector checkpoint with 'backbone.1.weight' "
@@ -116,7 +110,6 @@ def load_finetuned_model(
 
     missing, unexpected = model.cond_projector.load_state_dict(state, strict=True)
     if missing or unexpected:
-        # strict=True should error before this point, but keep guard
         raise RuntimeError(
             f"[LOAD] Projector state mismatch. Missing={missing} Unexpected={unexpected}"
         )

@@ -8,6 +8,13 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 from typing import Tuple
 
+# src/llm/modeling.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+from typing import Tuple
+import torch
+import torch.nn as nn
+
 
 class ViewTokens(nn.Module):
     def __init__(self, k: int, d_out: int):
@@ -20,44 +27,10 @@ class ViewTokens(nn.Module):
         return y.view(B, self.k, self.d_out)
 
 
-class RMSCenter(nn.Module):
-    def __init__(self, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        # per-token zero-mean + unit-RMS over last dim
-        t = t - t.mean(dim=-1, keepdim=True)
-        rms = torch.sqrt(t.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return t / rms
-
-
-class TokenAffine(nn.Module):
-    def __init__(self, k: int):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(k))  # per-token scale
-        self.beta = nn.Parameter(torch.zeros(k))  # per-token shift
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        # t: (B, k, d_out)
-        return t * self.gamma.view(1, -1, 1) + self.beta.view(1, -1, 1)
-
-
-class GlobalGain(nn.Module):
-    def __init__(self, init: float = 1.0):
-        super().__init__()
-        self.gain = nn.Parameter(torch.tensor(float(init)))
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        return self.gain * t
-
-
-# --- the projector ---
-
-
 class CondProjector(nn.Module):
     """
     (B, d_in) -> (B, k, d_out) virtual tokens + (B, n_classes) aux logits
+    Minimal head: LN -> Linear -> GELU -> Dropout -> Linear, then reshape.
     """
 
     def __init__(
@@ -67,13 +40,12 @@ class CondProjector(nn.Module):
         k: int = 8,
         n_classes: int = 2,
         p_drop: float = 0.10,
-        eps: float = 1e-6,
     ):
         super().__init__()
         self.k = k
         self.d_out = d_out
 
-        # backbone in flat space (B, k*d_out)
+        # (B, d_in) -> (B, k*d_out)
         self.backbone = nn.Sequential(
             nn.LayerNorm(d_in),
             nn.Linear(d_in, d_out * k),
@@ -82,21 +54,16 @@ class CondProjector(nn.Module):
             nn.Linear(d_out * k, d_out * k),
         )
 
-        # reshape + normalize + simple per-token affine + global gain
-        self.to_tokens = nn.Sequential(
-            ViewTokens(k, d_out),
-            RMSCenter(eps),
-            TokenAffine(k),
-            GlobalGain(1.0),
-        )
+        # reshape to tokens
+        self.view = ViewTokens(k, d_out)
 
-        # aux head on the flattened block
+        # auxiliary classification head on the flattened block
         self.aux_head = nn.Linear(d_out * k, n_classes)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: (B, d_in)
         y = self.backbone(x)  # (B, k*d_out)
-        tokens = self.to_tokens(y)  # (B, k, d_out)
+        tokens = self.view(y)  # (B, k, d_out)
         aux_logits = self.aux_head(y)  # (B, n_classes)
         return tokens, aux_logits
 
