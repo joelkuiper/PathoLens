@@ -83,30 +83,30 @@ def build_ctx_from_row(row) -> str:
     if hgvsp:
         lines.append(f"HGVS.p: {hgvsp}")
 
-    most = _clean_str(_get_value(row, "most_severe_consequence")).replace("_", " ")
-    impact_raw = _clean_str(_get_value(row, "impact"))
-    impact = impact_raw.title() if impact_raw else ""
-    if most and impact:
-        lines.append(f"Most severe consequence: {most} (impact: {impact})")
-    elif most:
-        lines.append(f"Most severe consequence: {most}")
-    elif impact:
-        lines.append(f"Impact: {impact}")
+    # most = _clean_str(_get_value(row, "most_severe_consequence")).replace("_", " ")
+    # impact_raw = _clean_str(_get_value(row, "impact"))
+    # impact = impact_raw.title() if impact_raw else ""
+    # if most and impact:
+    #     lines.append(f"Most severe consequence: {most} (impact: {impact})")
+    # elif most:
+    #     lines.append(f"Most severe consequence: {most}")
+    # elif impact:
+    #     lines.append(f"Impact: {impact}")
 
-    terms_fmt = _format_terms(_coalesce(row, ["consequence_terms"]))
-    if terms_fmt and terms_fmt.lower() != most.lower():
-        lines.append(f"Consequence terms: {terms_fmt}")
+    # terms_fmt = _format_terms(_coalesce(row, ["consequence_terms"]))
+    # if terms_fmt and terms_fmt.lower() != most.lower():
+    #     lines.append(f"Consequence terms: {terms_fmt}")
 
-    variant = _coalesce(row, ["variant_allele"])
-    if variant:
-        lines.append(f"Variant allele: {variant}")
+    # variant = _coalesce(row, ["variant_allele"])
+    # if variant:
+    #     lines.append(f"Variant allele: {variant}")
 
-    amino_acids = _coalesce(row, ["amino_acids"])
-    if amino_acids:
-        lines.append(f"Amino acids: {amino_acids}")
+    # amino_acids = _coalesce(row, ["amino_acids"])
+    # if amino_acids:
+    #     lines.append(f"Amino acids: {amino_acids}")
 
-    codons = _coalesce(row, ["codons"])
-    if codons:
-        lines.append(f"Codons: {codons}")
+    # codons = _coalesce(row, ["codons"])
+    # if codons:
+    #     lines.append(f"Codons: {codons}")
 
     return "\n".join(lines)
