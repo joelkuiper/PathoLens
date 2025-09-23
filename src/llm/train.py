@@ -67,9 +67,10 @@ class CondTrainer(Trainer):
             )
 
         # ===== fast dimension guard (catches dataset/model mismatch) =====
-        expected_d = getattr(getattr(model, "cond_projector", None), "net", [None])[0]
-        if hasattr(expected_d, "in_features"):
-            exp = int(expected_d.in_features)
+        cond_proj = getattr(model, "cond_projector", None)
+        expected_d = getattr(cond_proj, "d_in", None)
+        if expected_d is not None:
+            exp = int(expected_d)
             got = int(cond_vec.shape[-1])
             if got != exp:
                 raise RuntimeError(
@@ -325,9 +326,9 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     train_ds = CondTextDataset(seq_ds["train"], tokenizer=tok)
     val_ds = CondTextDataset(seq_ds["val"], tokenizer=tok)
     # sanity: dataset D_cond must match projector's in_features
-    assert train_ds.D_cond == D_cond == val_ds.D_cond, (
+    assert train_ds.D_cond == D_cond == val_ds.D_cond == projector.d_in, (
         f"D_cond mismatch: dataset(train)={train_ds.D_cond}, dataset(val)={val_ds.D_cond}, "
-        f"projector_in={projector.net[0].in_features}"
+        f"projector_in={projector.d_in}"
     )
 
     collator = make_collator(tok, max_len=cfg.max_len)
@@ -398,7 +399,7 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     trainer.train()
 
     base_model.save_pretrained(str(out_dir / "adapter"))
-    torch.save(projector.state_dict(), out_dir / "projector.pt")
+    projector.save_pretrained(out_dir / "projector")
     print("[INFO] Saved adapter + projector.")
 
     return {"out_dir": str(out_dir)}

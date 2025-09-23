@@ -1,19 +1,15 @@
 # src/llm/modeling.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, Tuple
+
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-
-from typing import Tuple
-
-# src/llm/modeling.py
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-from typing import Tuple
-import torch
-import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
 class ViewTokens(nn.Module):
@@ -33,6 +29,9 @@ class CondProjector(nn.Module):
     Minimal head: LN -> Linear -> GELU -> Dropout -> Linear, then reshape.
     """
 
+    CONFIG_NAME = "config.json"
+    WEIGHTS_NAME = "pytorch_model.bin"
+
     def __init__(
         self,
         d_in: int,
@@ -42,23 +41,26 @@ class CondProjector(nn.Module):
         p_drop: float = 0.10,
     ):
         super().__init__()
-        self.k = k
-        self.d_out = d_out
+        self.d_in = int(d_in)
+        self.d_out = int(d_out)
+        self.k = int(k)
+        self.n_classes = int(n_classes)
+        self.p_drop = float(p_drop)
 
         # (B, d_in) -> (B, k*d_out)
         self.backbone = nn.Sequential(
-            nn.LayerNorm(d_in),
-            nn.Linear(d_in, d_out * k),
+            nn.LayerNorm(self.d_in),
+            nn.Linear(self.d_in, self.d_out * self.k),
             nn.GELU(),
-            nn.Dropout(p_drop),
-            nn.Linear(d_out * k, d_out * k),
+            nn.Dropout(self.p_drop),
+            nn.Linear(self.d_out * self.k, self.d_out * self.k),
         )
 
         # reshape to tokens
-        self.view = ViewTokens(k, d_out)
+        self.view = ViewTokens(self.k, self.d_out)
 
         # auxiliary classification head on the flattened block
-        self.aux_head = nn.Linear(d_out * k, n_classes)
+        self.aux_head = nn.Linear(self.d_out * self.k, self.n_classes)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: (B, d_in)
@@ -66,6 +68,70 @@ class CondProjector(nn.Module):
         tokens = self.view(y)  # (B, k, d_out)
         aux_logits = self.aux_head(y)  # (B, n_classes)
         return tokens, aux_logits
+
+    # ------------------------------------------------------------------
+    # Serialization helpers
+    # ------------------------------------------------------------------
+    def get_config(self) -> Dict[str, Any]:
+        return {
+            "d_in": self.d_in,
+            "d_out": self.d_out,
+            "k": self.k,
+            "n_classes": self.n_classes,
+            "p_drop": self.p_drop,
+            "model_cls": self.__class__.__name__,
+            "module": self.__class__.__module__,
+        }
+
+    def save_pretrained(self, save_directory: str | Path) -> None:
+        save_dir = Path(save_directory)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        config_path = save_dir / self.CONFIG_NAME
+        weights_path = save_dir / self.WEIGHTS_NAME
+
+        with config_path.open("w", encoding="utf-8") as f:
+            json.dump(self.get_config(), f, indent=2, sort_keys=True)
+
+        torch.save(self.state_dict(), weights_path)
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CondProjector":
+        cfg = dict(config)
+        cfg.pop("model_cls", None)
+        cfg.pop("module", None)
+        return cls(**cfg)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        load_directory: str | Path,
+        *,
+        map_location: str | torch.device | None = "cpu",
+        strict: bool = True,
+    ) -> "CondProjector":
+        load_dir = Path(load_directory)
+        config_path = load_dir / cls.CONFIG_NAME
+        weights_path = load_dir / cls.WEIGHTS_NAME
+
+        if not config_path.is_file():
+            raise FileNotFoundError(f"Projector config not found: {config_path}")
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"Projector weights not found: {weights_path}")
+
+        with config_path.open("r", encoding="utf-8") as f:
+            config = json.load(f)
+
+        model_cls = config.get("model_cls")
+        if model_cls is not None and model_cls != cls.__name__:
+            raise ValueError(
+                f"Saved projector expects class '{model_cls}', cannot load with '{cls.__name__}'."
+            )
+
+        projector = cls.from_config(config)
+        state = torch.load(weights_path, map_location=map_location)
+        projector.load_state_dict(state, strict=strict)
+        return projector
 
 
 def build_qwen_with_lora(cfg, D_cond: int):
@@ -124,8 +190,9 @@ def build_qwen_with_lora(cfg, D_cond: int):
 
     hidden = base.config.hidden_size
     n_cond_tokens = getattr(cfg, "n_cond_tokens", 8)  # default to 8 as requested
+    base_param = next(base.parameters())
     projector = CondProjector(D_cond, hidden, k=n_cond_tokens).to(
-        next(base.parameters()).device
+        device=base_param.device, dtype=base_param.dtype
     )
     # Attach projector to the model so Trainer optimizes it
     base.add_module("cond_projector", projector)

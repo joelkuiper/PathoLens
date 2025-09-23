@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os
+from pathlib import Path
+
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
 from .modeling import CondProjector
 
 
@@ -26,17 +29,15 @@ def load_finetuned_model(
     projector_path: str,
 ):
     """
-    Load tokenizer, 4-bit base model + LoRA adapter, and the new minimal CondProjector.
-
-    Assumptions for the projector checkpoint (no backwards compatibility):
-      - 'backbone.1.weight' exists (Linear: [k*d_out, D_cond])
-      - d_out == model.config.hidden_size
-      - k = (out_features / hidden_size)
+    Load tokenizer, 4-bit base model + LoRA adapter, and the serialized CondProjector.
+    The projector is expected to have been saved via ``CondProjector.save_pretrained``
+    and resides in ``projector_path``.
     """
     if not os.path.isdir(adapter_dir):
         raise FileNotFoundError(f"[LOAD] Adapter directory not found: {adapter_dir}")
-    if not os.path.exists(projector_path):
-        raise FileNotFoundError(f"[LOAD] Projector weights not found: {projector_path}")
+    projector_dir = Path(projector_path)
+    if not projector_dir.is_dir():
+        raise FileNotFoundError(f"[LOAD] Projector directory not found: {projector_dir}")
 
     # ----- Tokenizer -----
     tok = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True)
@@ -63,59 +64,32 @@ def load_finetuned_model(
     model = PeftModel.from_pretrained(base, adapter_dir)
     model.eval()
 
-    # ----- Inspect projector checkpoint  -----
-    state = torch.load(projector_path, map_location="cpu")
-
-    key_w = (
-        "backbone.1.weight"  # LN(0) -> Linear(1) -> GELU(2) -> Dropout(3) -> Linear(4)
-    )
-    if key_w not in state:
-        raise KeyError(
-            "[LOAD] Expected projector checkpoint with 'backbone.1.weight' "
-            "(Linear from D_cond -> k*d_out)."
-        )
-
-    W = state[key_w]  # shape: [k*d_out, D_cond_saved]
-    if W.ndim != 2:
-        raise ValueError(f"[LOAD] {key_w} has ndim={W.ndim}, expected 2.")
-    out_features, D_cond_saved = int(W.shape[0]), int(W.shape[1])
+    # ----- Load serialized projector -----
+    projector = CondProjector.from_pretrained(projector_dir, map_location="cpu")
 
     hidden = int(model.config.hidden_size)
-    if out_features % hidden != 0:
+    if projector.d_out != hidden:
         raise ValueError(
-            "[LOAD] backbone.1.out_features not divisible by model hidden size:\n"
-            f"        out_features={out_features}, hidden_size={hidden}\n"
-            "        Cannot infer k (n_cond_tokens)."
+            "[LOAD] Projector hidden dim mismatch:\n"
+            f"        Saved d_out={projector.d_out}\n"
+            f"        Base model hidden_size={hidden}"
         )
-    k_saved = out_features // hidden
 
-    if D_cond != D_cond_saved:
+    if projector.d_in != D_cond:
         raise ValueError(
             "[LOAD] D_cond mismatch:\n"
             f"        Provided D_cond={D_cond}\n"
-            f"        Saved projector expects D_cond={D_cond_saved}\n"
+            f"        Saved projector expects D_cond={projector.d_in}\n"
             "        Pass the correct D_cond (e.g., D_eff + D_prot)."
         )
 
-    print(
-        f"[LOAD] Projector check OK: hidden={hidden} k={k_saved} D_cond={D_cond_saved}"
-    )
-
-    # ----- Rebuild projector and load weights strictly -----
     emb = model.get_input_embeddings().weight
-    projector = CondProjector(d_in=D_cond_saved, d_out=hidden, k=k_saved).to(
-        device=emb.device, dtype=emb.dtype
-    )
+    projector = projector.to(device=emb.device, dtype=emb.dtype)
     model.add_module("cond_projector", projector)
 
-    missing, unexpected = model.cond_projector.load_state_dict(state, strict=True)
-    if missing or unexpected:
-        raise RuntimeError(
-            f"[LOAD] Projector state mismatch. Missing={missing} Unexpected={unexpected}"
-        )
     print(
-        f"[LOAD] Projector loaded. dtype={next(projector.parameters()).dtype} "
-        f"device={next(projector.parameters()).device}"
+        f"[LOAD] Projector loaded. hidden={hidden} k={projector.k} D_cond={projector.d_in} "
+        f"dtype={next(projector.parameters()).dtype} device={next(projector.parameters()).device}"
     )
 
     # Align LoRA param dtype/device with the embedding table just in case
