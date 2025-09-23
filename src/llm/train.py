@@ -57,6 +57,14 @@ class CondTrainer(Trainer):
         label_weights = inputs.pop("label_weights", None)
         cond_vec = inputs.pop("cond_vec")
         gold_y = inputs.pop("_y", None)  # sequence-level class label
+        if gold_y is None:
+            raise KeyError("CondTrainer.compute_loss requires '_y' labels in the batch.")
+        if not torch.is_tensor(gold_y):
+            gold_y = torch.as_tensor(gold_y)
+        if gold_y.dtype != torch.long:
+            raise TypeError(
+                f"CondTrainer expects '_y' dtype torch.long but received {gold_y.dtype}."
+            )
 
         # ===== fast dimension guard (catches dataset/model mismatch) =====
         expected_d = getattr(getattr(model, "cond_projector", None), "net", [None])[0]
@@ -84,6 +92,17 @@ class CondTrainer(Trainer):
 
         # Projector returns: cond tokens, aux logits
         cond_emb, aux_logits = model.cond_projector(cond_vec)  # (B, K, H), (B, 2)
+        if aux_logits is None:
+            raise RuntimeError(
+                "cond_projector must return auxiliary logits when '_y' supervision is provided."
+            )
+
+        if gold_y.ndim == 0:
+            gold_y = gold_y.unsqueeze(0)
+        if gold_y.ndim != 1:
+            raise ValueError(
+                f"CondTrainer expects '_y' to be 1-D (batch,), got shape {tuple(gold_y.shape)}."
+            )
 
         # ===== PROMPT DROPOUT =====
         p_drop = float(getattr(model, "prompt_dropout_prob", 0.0))
@@ -163,8 +182,13 @@ class CondTrainer(Trainer):
         # Aux classification loss
         # -------------------
         aux_loss = None
-        if gold_y is not None and aux_logits is not None:
-            gold_y = gold_y.to(aux_logits.device, dtype=torch.long)
+        if gold_y is not None:
+            gold_y = gold_y.to(aux_logits.device)
+            if gold_y.shape[0] != aux_logits.size(0):
+                raise ValueError(
+                    "Batch size mismatch between auxiliary logits and '_y' labels." 
+                    f"Got {aux_logits.size(0)} logits vs {gold_y.shape[0]} labels."
+                )
             aux_loss = F.cross_entropy(aux_logits, gold_y)
 
         # -------------------

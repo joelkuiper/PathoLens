@@ -60,8 +60,13 @@ class CondTextDataset(Dataset):
         # Safe L2 norm
         cond /= (np.linalg.norm(cond) + 1e-6).astype("float32")
 
-        prompt, target = row_to_example(self.meta.iloc[i])
-        return {"cond_vec": cond, "prompt": prompt, "target": target}
+        meta_row = self.meta.iloc[i]
+        prompt, target = row_to_example(meta_row)
+        if "_y" not in meta_row:
+            raise KeyError("CondTextDataset requires '_y' label in metadata.")
+        y = int(meta_row.get("_y"))
+
+        return {"cond_vec": cond, "prompt": prompt, "target": target, "_y": y}
 
 
 def make_collator(
@@ -150,6 +155,10 @@ def make_collator(
         cond_vec = torch.from_numpy(
             np.stack([b["cond_vec"] for b in batch]).astype("float32")
         )
+        try:
+            gold_y = torch.tensor([int(b["_y"]) for b in batch], dtype=torch.long)
+        except KeyError as exc:  # pragma: no cover - defensive guard
+            raise KeyError("Collator expects '_y' labels from dataset.") from exc
 
         dt = time.time() - t0
         if dt > 0.2:
@@ -164,6 +173,7 @@ def make_collator(
             "labels": labels,
             "label_weights": label_weights,
             "cond_vec": cond_vec,
+            "_y": gold_y,
         }
 
     return collate
