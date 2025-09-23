@@ -54,24 +54,86 @@ Results are reported on the held-out **test split** (N = 33,115 variants). Posit
 ### Overall performance
 #### MLP probe
 
-| Mode      | Split | Thr  |  Acc  | BalAcc |   F1  | Prec  |  Rec  |  Spec |  ROC  |   PR  |
-|-----------|-------|------|-------|--------|-------|-------|-------|-------|-------|-------|
-| dna       | val   | 0.5  | 0.7613| 0.6557 | 0.4764| 0.5027| 0.4528| 0.8587| 0.7173| 0.5359|
-|           | val   | best | 0.7279| 0.6572 | 0.4788| 0.4428| 0.5213| 0.7931| 0.7173| 0.5359|
-| dna       | test  | 0.5  | 0.7713| 0.6532 | 0.4603| 0.4806| 0.4416| 0.8647| 0.7118| 0.5166|
-|           | test  | best | 0.7340| 0.6526 | 0.4569| 0.4160| 0.5066| 0.7985| 0.7118| 0.5166|
-| prot      | val   | 0.5  | 0.7446| 0.6323 | 0.4388| 0.4638| 0.4164| 0.8481| 0.6735| 0.4927|
-|           | val   | best | 0.7837| 0.6433 | 0.4530| 0.5754| 0.3735| 0.9131| 0.6735| 0.4927|
-| prot      | test  | 0.5  | 0.7947| 0.6752 | 0.4980| 0.5411| 0.4613| 0.8891| 0.7304| 0.5409|
-|           | test  | best | 0.8251| 0.6757 | 0.5076| 0.6707| 0.4083| 0.9432| 0.7304| 0.5409|
-| dna+prot  | val   | 0.5  | 0.7631| 0.7515 | 0.5962| 0.5042| 0.7293| 0.7737| 0.8291| 0.6765|
-|           | val   | best | 0.8319| 0.7578 | 0.6371| 0.6604| 0.6155| 0.9002| 0.8291| 0.6765|
-| dna+prot  | test  | 0.5  | 0.8160| 0.7954 | 0.6455| 0.5617| 0.7585| 0.8323| 0.8579| 0.7171|
-|           | test  | best | 0.8685| 0.7845 | 0.6804| 0.7342| 0.6340| 0.9350| 0.8579| 0.7171|
+| Mode      | Split | Thr  |  Acc  | BalAcc |   F1  | Prec  |  Rec  |  Spec |  ROC  |
+|-----------|-------|------|-------|--------|-------|-------|-------|-------|-------|
+| dna       | val   | 0.5  | 0.7613| 0.6557 | 0.4764| 0.5027| 0.4528| 0.8587| 0.7173|
+|           | val   | best | 0.7279| 0.6572 | 0.4788| 0.4428| 0.5213| 0.7931| 0.7173|
+| dna       | test  | 0.5  | 0.7713| 0.6532 | 0.4603| 0.4806| 0.4416| 0.8647| 0.7118|
+|           | test  | best | 0.7340| 0.6526 | 0.4569| 0.4160| 0.5066| 0.7985| 0.7118|
+| prot      | val   | 0.5  | 0.7446| 0.6323 | 0.4388| 0.4638| 0.4164| 0.8481| 0.6735|
+|           | val   | best | 0.7837| 0.6433 | 0.4530| 0.5754| 0.3735| 0.9131| 0.6735|
+| prot      | test  | 0.5  | 0.7947| 0.6752 | 0.4980| 0.5411| 0.4613| 0.8891| 0.7304|
+|           | test  | best | 0.8251| 0.6757 | 0.5076| 0.6707| 0.4083| 0.9432| 0.7304|
+| dna+prot  | val   | 0.5  | 0.7631| 0.7515 | 0.5962| 0.5042| 0.7293| 0.7737| 0.8291|
+|           | val   | best | 0.8319| 0.7578 | 0.6371| 0.6604| 0.6155| 0.9002| 0.8291|
+| dna+prot  | test  | 0.5  | 0.8160| 0.7954 | 0.6455| 0.5617| 0.7585| 0.8323| 0.8579|
+|           | test  | best | 0.8685| 0.7845 | 0.6804| 0.7342| 0.6340| 0.9350| 0.8579|
+
+This table show the results of a 2-layer Multi Layer Perceptron (MLP) on the raw concatenated embedding space (without the LLM).
+See [mlp_test.py](./src/mlp_test.py). These results demonstrate that there is learnable signal in the embedding space, and that the concatenated vector outperforms each embedding space individually.
+
+An earlier version ([3b65d2a](https://github.com/joelkuiper/PathoLens/commit/3b65d2a9859d138cf86adb37cfa9cc711cc6e093)) also used a node2vec embedding derived from the Gene Ontology (GO) and a Gene Annotation File (GAF), however it was decided to drop this feature due to poor performance.
 
 #### LLM Full dataset
-#### LLM missense only
+**Classification results (Test)**
+| Metric    | Value |
+| --------- | ----- |
+| Accuracy  | 0.955 |
+| Precision | 0.911 |
+| Recall    | 0.881 |
+| F1        | 0.896 |
+| ROC–AUC   | 0.985 |
 
+**Confusion matrix (Test)**
+|                     | Pred Benign | Pred Pathogenic |
+| ------------------- | ----------- | --------------- |
+| **True Benign**     | 24,682      | 617             |
+| **True Pathogenic** | 856         | 6,313           |
+
+
+**Ablation results (Validation, n = 10,000)**
+| Mode         | Acc    | F1     | ROC–AUC | PR–AUC |
+| ------------ | ------ | ------ | ------- | ------ |
+| cond+prompt  | 0.9392 | 0.8956 | 0.9827  | 0.9661 |
+| cond\_only   | 0.7716 | 0.5388 | 0.7479  | 0.5885 |
+| prompt\_only | 0.9265 | 0.8730 | 0.9763  | 0.9540 |
+
+Δ vs cond+prompt:
+- cond_only     ΔAcc=-0.1676  ΔF1=-0.3569  ΔROC-AUC=-0.2348  ΔPR-AUC=-0.3776
+- prompt_only   ΔAcc=-0.0127  ΔF1=-0.0226  ΔROC-AUC=-0.0064  ΔPR-AUC=-0.0120
+
+These results show that whilst the model is able to learn the separation between benign and pathogenic, it seems to do this almost exclusively on the prompt (only a small lift in prompt+cond from the ablation probe).
+
+#### LLM missense only
+Focusing on `most_severe_consequence=missense_variant` from VEP we obtain the following results.
+
+### Classification report
+|                | precision | recall | f1-score | support |
+|----------------|-----------|--------|----------|---------|
+| **Benign**     | 0.877     | 0.876  | 0.877    | 3117    |
+| **Pathogenic** | 0.812     | 0.814  | 0.813    | 2053    |
+| **accuracy**   |           |        | 0.851    | 5170    |
+| **macro avg**  | 0.845     | 0.845  | 0.845    | 5170    |
+| **weighted avg** | 0.851   | 0.851  | 0.851    | 5170    |
+
+### Confusion Matrix (TEST)
+
+|                     | Pred Benign | Pred Pathogenic |
+|---------------------|-------------|-----------------|
+| **True Benign**     | 2730        | 387             |
+| **True Pathogenic** | 382         | 1671            |
+
+
+### Ablation test
+| Mode           |    N |   Acc  |   F1   | ROC-AUC | PR-AUC |
+|----------------|------|--------|--------|---------|--------|
+| cond+prompt    | 5170 | 0.8507 | 0.8118 |  0.9224 | 0.8972 |
+| cond_only      | 5170 | 0.7062 | 0.4604 |  0.7734 | 0.7223 |
+| prompt_only    | 5170 | 0.8087 | 0.7229 |  0.8897 | 0.8519 |
+| cond+noise     | 5170 | 0.8135 | 0.7382 |  0.8871 | 0.8523 |
+| cond+permute   | 5170 | 0.7768 | 0.7214 |  0.8480 | 0.7819 |
+
+Here we do observe a lift in performance in `cond+prompt` but the prompt still carries considerable signal, further investigation is warranted in these results.
 
 ## Set-up and training
 ### Input
@@ -86,10 +148,7 @@ mkdir -p data/raw/
 wget -i sources.txt -P data/raw/
 ```
 
-In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
-
-Note that currently it parses the HGVS symbols from the `Name` field in ClinVar and derives several features from that.
-(see [clinvar.py](./src/clinvar.py)). Ideally this would not be the case.
+In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g), [ESM2](https://huggingface.co/facebook/esm2_t12_35M_UR50D) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
 
 ### Dependencies
 Install the dependencies via [uv](https://docs.astral.sh/uv/) and activate the venv.
@@ -102,7 +161,7 @@ source .venv/bin/activate
 
 ### Pipeline configuration
 
-All pipeline stages are now configured via a single TOML file. An annotated example is
+All pipeline stages are configured via a single TOML file. An example is
 available at [`configs/pipeline.example.toml`](./configs/pipeline.example.toml). Copy it
 to a new location (e.g. `configs/pipeline.local.toml`) and update the paths to match your
 environment:
@@ -111,7 +170,6 @@ environment:
   directory.
 - `[DNA]` controls nucleotide-transformer windowing/encoding and cache overwrite flags.
 - `[Protein]` enables the optional VEP → ESM2 pathway and includes Docker/cache settings.
-- `[Train]` reserves knobs for classical ML experiments (unused in the current pipeline).
 - `[LLM]` configures the Qwen LoRA fine-tune.
 - `[Run]` controls manifest writing and global overrides (e.g. forcing split regeneration).
 
@@ -149,7 +207,7 @@ train_ds = datasets["train"]
 returns the parsed config alongside the manifest/dataset objects for further
 inspection.
 
-To reproduce the classical MLP ablation probe, load the datasets as above and run:
+To reproduce the MLP ablation probe, load the datasets as above and run:
 
 ```python
 from src.mlp_test import run_ablation_probes, print_probe_table
