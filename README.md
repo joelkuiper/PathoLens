@@ -5,16 +5,16 @@
 ## Task
 Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicity of a variant. Many tools attempt to predict pathogenicity (e.g., CADD), and it is generally considered a hard problem because signal comes from diverse molecular and biological factors.
 
-Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector and optional protein-level descriptors built from Ensembl VEP + ESM2 embeddings.
+Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector and protein-level descriptors built from Ensembl VEP + ESM2 embeddings.
 
 ## Intuition and basic idea
 
-PathoLens separates “feature extraction” from “decision making.” The feature extractor produces a compact numeric summary of the variant: a nucleotide-transformer difference vector (`dna_alt – dna_ref`) that approximates local sequence perturbation, optionally concatenated with protein embeddings aligned per variant. This joint vector is projected into a small set of *virtual tokens* that are prepended to the natural-language prompt. A decoder-only LLM is then fine-tuned (via LoRA) to read those tokens alongside a short textual context (gene symbol, HGVS, coarse consequence heuristics) and emit a single-word label.
+PathoLens separates “feature extraction” from “decision making.” The feature extractor produces a compact numeric summary of the variant: a nucleotide-transformer difference vector (`dna_alt – dna_ref`) that approximates local sequence perturbation, optionally concatenated with protein embeddings (`prot_mt - prot_wt`) aligned per variant. This joint vector is projected into a small set of *virtual tokens* that are prepended to the natural-language prompt. A decoder-only LLM is then fine-tuned (via LoRA) to read those tokens alongside a short textual context (gene symbol, HGVS, optional coarse consequence heuristics) and emit a single-word label.
 
 Why this could work:
 
 1. **Transformers attend over tokens.** Encoding the biology as a few learned embeddings lets the model attend to it at every layer, without adding a separate classifier head.
-2. **The conditioning is informative.** `alt – ref` captures a local perturbation signal, and protein embeddings inject coarse functional context when available.
+2. **The conditioning is informative.** `alt – ref` captures a local perturbation signal, and protein embeddings inject coarse functional context.
 3. **LoRA is enough to retarget attention.** Low-rank adapters let the model learn to route from the textual scaffold to the conditioning without full retraining.
 4. **Probabilities fall out naturally.** The target is literally a vocabulary word, so we can score `log P("Benign")` vs `log P("Pathogenic")` directly.
 
@@ -37,6 +37,8 @@ We derive a **local sequence perturbation vector** from GRCh38 using the ClinVar
 
 The final signal is the **normalized effect vector** `dna_eff = normalize(embed(ALT) − embed(REF))`, which emphasizes local changes while cancelling much of the background sequence. Only this effect array is persisted on disk (FP16 in a compressed NPZ), alongside a Feather file that caches the curated windows and minimal provenance (window size, FASTA path, row alignment). At training time, `dna_eff` is concatenated with any available protein embeddings to form the conditioning input supplied to the LLM as virtual tokens.
 
+### Protein embedding
+For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s protein language model). Using Ensembl VEP with the ProteinSeqs plugin, we extract both the wild-type and mutated protein sequences for each ClinVar variant. These sequences are embedded with ESM-2, and we compute a delta representation that captures the local effect of the mutation on the protein context. This embedding encodes biochemical and structural information (such as residue conservation, substitution severity, and domain context) that goes beyond simple VEP consequence labels. The resulting protein effect vectors are concatenated with DNA effect to form the conditioning input to our projector, which maps them into virtual tokens that the LLM consumes alongside the variant prompt.
 
 ### LLM fine-tuning
 The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A small projector (Linear → Tanh) maps the conditioning vector to **K** virtual token embeddings (default **K = 4**), which are prepended to the chat prompt. Fine-tuning uses LoRA on attention and MLP blocks.
@@ -45,31 +47,30 @@ The target is the **bare label word** (“Benign” or “Pathogenic”). All pr
 
 
 ## Results (Test set)
-We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits to minimize leakage across splits. The model consumes only a compact conditioning vector (dna_eff, optionally augmented with protein embeddings) and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
+We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits. The model consumes only a compact conditioning vector and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
 
 Results are reported on the held-out **test split** (N = 33,115 variants). Positive class = **Pathogenic**, negative class = **Benign**.
 
 ### Overall performance
+#### MLP probe
 
-| Metric               |      Value |
-|----------------------|-----------:|
-| Accuracy             | **95.99%** |
-| Precision            | **91.39%** |
-| Recall               | **89.95%** |
-| F1                   | **90.67%** |
-| ROC–AUC              | **0.9899** |
-| PR–AUC               | **0.9696** |
+| Mode      | Split | Thr  |  Acc  | BalAcc |   F1  | Prec  |  Rec  |  Spec |  ROC  |   PR  |
+|-----------|-------|------|-------|--------|-------|-------|-------|-------|-------|-------|
+| dna       | val   | 0.5  | 0.7613| 0.6557 | 0.4764| 0.5027| 0.4528| 0.8587| 0.7173| 0.5359|
+|           | val   | best | 0.7279| 0.6572 | 0.4788| 0.4428| 0.5213| 0.7931| 0.7173| 0.5359|
+| dna       | test  | 0.5  | 0.7713| 0.6532 | 0.4603| 0.4806| 0.4416| 0.8647| 0.7118| 0.5166|
+|           | test  | best | 0.7340| 0.6526 | 0.4569| 0.4160| 0.5066| 0.7985| 0.7118| 0.5166|
+| prot      | val   | 0.5  | 0.7446| 0.6323 | 0.4388| 0.4638| 0.4164| 0.8481| 0.6735| 0.4927|
+|           | val   | best | 0.7837| 0.6433 | 0.4530| 0.5754| 0.3735| 0.9131| 0.6735| 0.4927|
+| prot      | test  | 0.5  | 0.7947| 0.6752 | 0.4980| 0.5411| 0.4613| 0.8891| 0.7304| 0.5409|
+|           | test  | best | 0.8251| 0.6757 | 0.5076| 0.6707| 0.4083| 0.9432| 0.7304| 0.5409|
+| dna+prot  | val   | 0.5  | 0.7631| 0.7515 | 0.5962| 0.5042| 0.7293| 0.7737| 0.8291| 0.6765|
+|           | val   | best | 0.8319| 0.7578 | 0.6371| 0.6604| 0.6155| 0.9002| 0.8291| 0.6765|
+| dna+prot  | test  | 0.5  | 0.8160| 0.7954 | 0.6455| 0.5617| 0.7585| 0.8323| 0.8579| 0.7171|
+|           | test  | best | 0.8685| 0.7845 | 0.6804| 0.7342| 0.6340| 0.9350| 0.8579| 0.7171|
 
-  ### Confusion matrix
-
-|                        |    Pred: Benign | Pred: Pathogenic |  Row total |
-| ---------------------- | --------------: | ---------------: | ---------: |
-| **Actual: Benign**     | **25,330** (TN) |     **608** (FP) |     25,938 |
-| **Actual: Pathogenic** |    **721** (FN) |   **6,456** (TP) |      7,177 |
-| **Column total**       |          26,051 |            7,064 | **33,115** |
-
-**Notes.** The model maintains a low false-positive rate (FP = 608; **FPR ≈ 2.34%**) while missing some positives (FN = 721; **FNR ≈ 10.05%**), indicating a slightly conservative bias toward the Benign label unless evidence is strong. The very high ROC–AUC and PR–AUC suggest robust ranking quality across thresholds.
-
+#### LLM Full dataset
+#### LLM missense only
 
 
 ## Set-up and training
