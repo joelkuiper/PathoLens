@@ -41,6 +41,8 @@ For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s p
 
 By default the code attempts to run VEP through Docker (by pulling the image from the Docker registry). It is possible to use `vep` from the `$PATH` instead by setting the flag in the configuration TOML.
 
+When VEP produces multiple transcript consequence annotations for a single variant, we adhere to the following pick order by default: `mane_select, canonical, appris, ccds, rank, tsl, length`.
+
 ### LLM fine-tuning
 The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are **prepended** to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
 
