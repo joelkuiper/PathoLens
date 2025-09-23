@@ -5,7 +5,7 @@
 ## Task
 Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicity of a variant. Many tools attempt to predict pathogenicity (e.g., CADD), and it is generally considered a hard problem because signal comes from diverse molecular and biological factors.
 
-Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector and protein-level descriptors built from Ensembl VEP + ESM2 embeddings.
+Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector and protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM2](https://github.com/facebookresearch/esm) embeddings.
 
 ## Intuition and basic idea
 
@@ -15,8 +15,7 @@ Why this could work:
 
 1. **Transformers attend over tokens.** Encoding the biology as a few learned embeddings lets the model attend to it at every layer, without adding a separate classifier head.
 2. **The conditioning is informative.** `alt – ref` captures a local perturbation signal, and protein embeddings inject coarse functional context.
-3. **LoRA is enough to retarget attention.** Low-rank adapters let the model learn to route from the textual scaffold to the conditioning without full retraining.
-4. **Probabilities fall out naturally.** The target is literally a vocabulary word, so we can score `log P("Benign")` vs `log P("Pathogenic")` directly.
+3. **Probabilities fall out naturally.** The target is literally a vocabulary word, so we can score `log P("Benign")` vs `log P("Pathogenic")` directly.
 
 This is not a claim that the approach *works*. It’s a test of whether modest, structured biological signal, inserted in a way that matches how transformers operate, can move the needle on a hard classification task.
 
@@ -38,10 +37,10 @@ We derive a **local sequence perturbation vector** from GRCh38 using the ClinVar
 The final signal is the **normalized effect vector** `dna_eff = normalize(embed(ALT) − embed(REF))`, which emphasizes local changes while cancelling much of the background sequence. Only this effect array is persisted on disk (FP16 in a compressed NPZ), alongside a Feather file that caches the curated windows and minimal provenance (window size, FASTA path, row alignment). At training time, `dna_eff` is concatenated with any available protein embeddings to form the conditioning input supplied to the LLM as virtual tokens.
 
 ### Protein embedding
-For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s protein language model). Using Ensembl VEP with the ProteinSeqs plugin, we extract both the wild-type and mutated protein sequences for each ClinVar variant. These sequences are embedded with ESM-2, and we compute a delta representation that captures the local effect of the mutation on the protein context. This embedding encodes biochemical and structural information (such as residue conservation, substitution severity, and domain context) that goes beyond simple VEP consequence labels. The resulting protein effect vectors are concatenated with DNA effect to form the conditioning input to our projector, which maps them into virtual tokens that the LLM consumes alongside the variant prompt.
+For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s protein language model). Using Ensembl VEP with the ProteinSeqs plugin, we extract both the wild-type and mutated protein sequences for each ClinVar variant. These sequences are embedded with ESM-2, and we compute a delta representation after mean pooling that captures the local effect of the mutation on the protein context. This embedding encodes biochemical and structural information (such as residue conservation, substitution severity, and domain context) that goes beyond simple VEP consequence labels. The resulting protein effect vectors are concatenated with DNA effect to form the conditioning input to our projector, which maps them into virtual tokens that the LLM consumes alongside the variant prompt.
 
 ### LLM fine-tuning
-The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (LayerNorm → Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are **prepended** to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
+The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are **prepended** to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
 
 Alongside the tokens, the projector exposes a small **auxiliary classification head**: a single Linear over the flattened projection (`k*d_out → n_classes`). During training we combine the aux-head cross-entropy with the main LM loss (on the label word) using a modest weight. This gives the projector a direct discriminative signal, stabilizes early training, and encourages the projected tokens to be informative. The aux head is **only** a training aid; at inference we ignore it and score purely from the LM by comparing the log-likelihoods of the two label tokens (“Benign” vs “Pathogenic”).
 
