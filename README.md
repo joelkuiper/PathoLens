@@ -51,8 +51,6 @@ Alongside the tokens, the projector exposes a small **auxiliary classification h
 ## Results (Test set)
 We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits. The model consumes only a compact conditioning vector and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
 
-Results are reported on the held-out **test split** (N = 33,115 variants). Positive class = **Pathogenic**, negative class = **Benign**.
-
 ### Overall performance
 #### MLP probe (Validation)
 
@@ -98,7 +96,7 @@ An earlier version ([3b65d2a](https://github.com/joelkuiper/PathoLens/commit/3b6
 - cond_only     ΔAcc=-0.1676  ΔF1=-0.3569  ΔROC-AUC=-0.2348  ΔPR-AUC=-0.3776
 - prompt_only   ΔAcc=-0.0127  ΔF1=-0.0226  ΔROC-AUC=-0.0064  ΔPR-AUC=-0.0120
 
-These results show that whilst the model is able to learn the separation between benign and pathogenic, it seems to do this almost exclusively on the prompt (only a small lift in prompt+cond from the ablation probe).
+These results show that whilst the model is able to learn the separation between benign and pathogenic, it seems to do this almost exclusively on the prompt (only a small lift in prompt+cond from the ablation probe). The HGVS.p notation seems to carry a considerable amount of signal on its own, based on earlier experiments.
 
 #### LLM missense only
 Focusing on `most_severe_consequence = missense_variant` from VEP we obtain the following results. We emphasize missense variants because they are biologically and clinically the hardest class:
