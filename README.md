@@ -9,7 +9,7 @@ Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an L
 
 ## Intuition and basic idea
 
-PathoLens separates “feature extraction” from “decision making.” The feature extractor produces a compact numeric summary of the variant: a nucleotide-transformer difference vector (`dna_alt – dna_ref`) that approximates local sequence perturbation, optionally concatenated with protein embeddings (`prot_mt - prot_wt`) aligned per variant. This joint vector is projected into a small set of *virtual tokens* that are prepended to the natural-language prompt. A decoder-only LLM is then fine-tuned (via LoRA) to read those tokens alongside a short textual context (gene symbol, HGVS, optional coarse consequence heuristics) and emit a single-word label.
+PathoLens separates “feature extraction” from “decision making.” The feature extractor produces a compact numeric summary of the variant: a nucleotide-transformer difference vector (`dna_alt – dna_ref`) that approximates local sequence perturbation, concatenated with protein embeddings (`prot_mt - prot_wt`) aligned per variant. This joint vector is projected into a small set of *virtual tokens* that are prepended to the natural-language prompt. A decoder-only LLM is then fine-tuned (via LoRA) to read those tokens alongside a short textual context (gene symbol, HGVS, optional coarse consequence heuristics) and emit a single-word label.
 
 Why this could work:
 
@@ -177,7 +177,7 @@ environment:
 - `[Paths]` points at the ClinVar TSV, GRCh38 FASTA, and the destination artifacts
   directory.
 - `[DNA]` controls nucleotide-transformer windowing/encoding and cache overwrite flags.
-- `[Protein]` enables the optional VEP → ESM2 pathway and includes Docker/cache settings.
+- `[Protein]` controls the VEP → ESM2 pathway and includes Docker/cache settings.
 - `[LLM]` configures the Qwen LoRA fine-tune.
 - `[Run]` controls manifest writing and global overrides (e.g. forcing split regeneration).
 
