@@ -135,7 +135,7 @@ By concentrating evaluation on missense variants, we test whether the conditioni
 | cond+noise     | 5170 | 0.8135 | 0.7382 |  0.8871 | 0.8523 |
 | cond+permute   | 5170 | 0.7768 | 0.7214 |  0.8480 | 0.7819 |
 
-Here we do observe a lift in performance in `cond+prompt` but the prompt still carries considerable signal, further investigation is warranted in these results.
+Here we do observe a lift in performance in `cond+prompt` but the prompt still carries considerable signal (weirdly, since it's just HGVS + Gene symbol). Further investigation is warranted.
 
 ## Set-up and training
 ### Input

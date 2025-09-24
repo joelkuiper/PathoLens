@@ -102,6 +102,44 @@ def _prompt_blank_context(ds_split, *, debug: bool = True):
             delattr(ds_split, "_force_blank_prompts")
 
 
+@contextmanager
+def _prompt_blank_fields_context(
+    ds_split,
+    field_keys: Sequence[str],
+    *,
+    tag: str,
+    debug: bool = True,
+):
+    """Temporarily blank selected prompt fields based on canonical keys."""
+
+    meta = getattr(ds_split, "meta", None)
+    if meta is None:
+        yield False
+        return
+
+    cols_all = [c for c in PROMPT_SRC_COLS + ["Name"] if c in meta.columns]
+    if not cols_all:
+        yield False
+        return
+
+    low_keys = {str(k).lower() for k in field_keys}
+    target_cols = [c for c in cols_all if c.lower() in low_keys]
+    if not target_cols:
+        yield False
+        return
+
+    before = meta[cols_all].copy(deep=True)
+    try:
+        for col in target_cols:
+            meta[col] = ""
+        if debug:
+            _debug_dump_sources(before, meta[cols_all], tag=tag, cols=cols_all)
+        yield True
+    finally:
+        for col in cols_all:
+            meta[col] = before[col]
+
+
 # ----------------------------
 # Conditioning transforms (identity / zero / noise / permute / scale / pure-noise)
 # ----------------------------
@@ -112,6 +150,7 @@ class _CondTransformCfg:
     noise_alpha: float = 0.0  # if noise_std is None, use alpha*std(v)
     scale: float = 1.0
     perm_index: Optional[np.ndarray] = None  # length = len(split)
+    zero_ranges: Optional[Tuple[Tuple[int, int], ...]] = None  # slices to zero post-transform
 
 
 class _TransformedSplit:
@@ -170,6 +209,20 @@ class _TransformedSplit:
         else:  # identity or permute (already swapped)
             z = v
 
+        zero_ranges = self.cfg.zero_ranges or ()
+        if zero_ranges:
+            if not isinstance(z, np.ndarray):
+                z = np.asarray(z, dtype=np.float32)
+            if not z.flags.writeable or mode in ("identity", "permute"):
+                z = z.copy()
+            n = z.shape[0]
+            for start, end in zero_ranges:
+                s = max(0, min(n, int(start)))
+                e = max(0, min(n, int(end)))
+                if e > s:
+                    z[s:e] = 0.0
+            z = z.astype(np.float32, copy=False)
+
         return torch.from_numpy(z), y1, y2
 
     def __getattr__(self, name):
@@ -183,6 +236,22 @@ def _with_cond_identity(seq_ds: Dict[str, Any]) -> Dict[str, Any]:
 
 def _with_cond_zero(seq_ds: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _CondTransformCfg(mode="zero")
+    return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
+
+
+def _with_cond_zero_ranges(
+    seq_ds: Dict[str, Any], ranges: Sequence[Tuple[int, int]]
+) -> Dict[str, Any]:
+    cleaned: List[Tuple[int, int]] = []
+    for start, end in ranges:
+        s = int(start)
+        e = int(end)
+        if e > s:
+            cleaned.append((s, e))
+    cfg = _CondTransformCfg(
+        mode="identity",
+        zero_ranges=tuple(cleaned) if cleaned else None,
+    )
     return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
 
 
@@ -279,19 +348,28 @@ def run_prompt_vs_cond_ablation(
 ) -> Dict[str, dict]:
     """
     Evaluates:
-      1) cond only     (prompt blanked; conditioning present)
-      2) cond+prompt   (baseline; conditioning + prompt)
-      3) prompt only   (conditioning zeroed entirely)
-      4) cond+noise    (conditioning noised; prompt intact)
-      5) cond+permute  (conditioning shuffled across items; prompt intact)
-      6) pure-noise    (conditioning replaced by noise; prompt intact)
-      7) cond×scale(s) (conditioning scaled by each factor; prompt intact)
+      - cond only         (prompt blanked; conditioning present)
+      - cond+prompt       (baseline; conditioning + prompt)
+      - cond_zero_dna     (conditioning DNA block zeroed; if present)
+      - cond_zero_prot    (conditioning protein block zeroed; if present)
+      - prompt only       (conditioning zeroed entirely)
+      - prompt_no_hgvsp   (prompt intact minus HGVS.p)
+      - prompt_no_hgvsc   (prompt intact minus HGVS.c)
+      - prompt_no_gene    (prompt intact minus gene symbol)
+      - cond+noise        (conditioning + strong Gaussian noise)
+      - cond+permute      (conditioning shuffled across items; prompt intact)
+      - pure-noise        (conditioning replaced by noise; prompt intact)
+      - cond×scale(s)     (conditioning scaled by scalar(s); prompt intact)
 
     Returns: dict of mode -> metrics.
     """
     results: Dict[str, dict] = {}
 
-    # --- (1) cond only (blank prompts) ---
+    train_split = seq_ds.get("train")
+    D_eff = int(getattr(train_split, "D_eff", 0) or 0) if train_split is not None else 0
+    D_prot = int(getattr(train_split, "D_prot", 0) or 0) if train_split is not None else 0
+
+    # --- cond only (blank prompts) ---
     print("\n[ABL] cond only (prompts blanked)")
     with _prompt_blank_context(seq_ds[split], debug=debug_prompts):
         view_cond_only = _with_cond_identity(seq_ds)
@@ -305,7 +383,7 @@ def run_prompt_vs_cond_ablation(
         )
     results["cond_only"] = out
 
-    # --- (2) cond+prompt (baseline) ---
+    # --- cond+prompt (baseline) ---
     print("\n[ABL] cond+prompt (baseline)")
     view_normal = _with_cond_identity(seq_ds)
     out = evaluate_split_batched(
@@ -318,7 +396,35 @@ def run_prompt_vs_cond_ablation(
     )
     results["cond+prompt"] = out
 
-    # --- (3) prompt only (conditioning removed) ---
+    # --- cond_zero_dna (zero only DNA features) ---
+    if D_eff > 0:
+        print("\n[ABL] cond_zero_dna (conditioning: zero DNA block)")
+        view_zero_dna = _with_cond_zero_ranges(seq_ds, [(0, D_eff)])
+        out = evaluate_split_batched(
+            view_zero_dna,
+            out_dir=out_dir,
+            split=split,
+            max_n=max_n,
+            batch_size=batch_size,
+            sample_rationales=0,
+        )
+        results["cond_zero_dna"] = out
+
+    # --- cond_zero_prot (zero only protein features) ---
+    if D_prot > 0:
+        print("\n[ABL] cond_zero_prot (conditioning: zero protein block)")
+        view_zero_prot = _with_cond_zero_ranges(seq_ds, [(D_eff, D_eff + D_prot)])
+        out = evaluate_split_batched(
+            view_zero_prot,
+            out_dir=out_dir,
+            split=split,
+            max_n=max_n,
+            batch_size=batch_size,
+            sample_rationales=0,
+        )
+        results["cond_zero_prot"] = out
+
+    # --- prompt only (conditioning removed) ---
     print("\n[ABL] prompt only (conditioning zeroed)")
     view_prompt_only = _with_cond_zero(seq_ds)
     out = evaluate_split_batched(
@@ -330,6 +436,31 @@ def run_prompt_vs_cond_ablation(
         sample_rationales=0,
     )
     results["prompt_only"] = out
+
+    # --- prompt field removals ---
+    prompt_field_abls = [
+        ("prompt_no_hgvsp", ("hgvsp", "hgvs.p", "hgvs_p"), "remove HGVS.p from prompt"),
+        ("prompt_no_hgvsc", ("hgvsc", "hgvs.c", "hgvs_c"), "remove HGVS.c from prompt"),
+        ("prompt_no_gene", ("gene_symbol", "genesymbol"), "remove gene symbol from prompt"),
+    ]
+    for name, keys, desc in prompt_field_abls:
+        print(f"\n[ABL] {name} ({desc})")
+        with _prompt_blank_fields_context(
+            seq_ds[split], field_keys=keys, tag=name, debug=debug_prompts
+        ) as applied:
+            if not applied:
+                print(f"[ABL] {name}: no matching columns; skipped.")
+                continue
+            view_prompt_variant = _with_cond_identity(seq_ds)
+            out = evaluate_split_batched(
+                view_prompt_variant,
+                out_dir=out_dir,
+                split=split,
+                max_n=max_n,
+                batch_size=batch_size,
+                sample_rationales=0,
+            )
+        results[name] = out
 
     # --- (4) cond+noise (conditioning + strong Gaussian noise) ---
     print("\n[ABL] cond+noise (conditioning + Gaussian noise)")
@@ -409,7 +540,19 @@ def run_prompt_vs_cond_ablation(
     print(f"\nAblation summary [{split}]")
     print(f"{'Mode':14} {'N':>6} {'Acc':>8} {'F1':>8} {'ROC-AUC':>10} {'PR-AUC':>10}")
     print("-" * 54)
-    ordered = ["cond+prompt", "cond_only", "prompt_only", "cond+noise"]
+    ordered = ["cond+prompt"]
+    for key in [
+        "cond_only",
+        "cond_zero_dna",
+        "cond_zero_prot",
+        "prompt_only",
+        "prompt_no_hgvsp",
+        "prompt_no_hgvsc",
+        "prompt_no_gene",
+        "cond+noise",
+    ]:
+        if key in results:
+            ordered.append(key)
     if "cond+permute" in results:
         ordered.append("cond+permute")
     if "pure-noise" in results:
