@@ -201,8 +201,12 @@ python train.py --config configs/pipeline.local.toml
 Use `--device` to override the auto-detected accelerator (`cpu`, `cuda:0`, …) and
 `--skip-train` to stop after cache + manifest creation. When enabled, a manifest JSON is
 written to `Run.manifest` (defaults to `artifacts/pipeline_manifest.json`) describing all
-derived artifacts. For a quick interactive look at the cached datasets, drop into
-IPython and paste:
+derived artifacts.
+
+The full fine-tune on a RTX 4090 takes roughly 6 hours; building caches and running
+evaluation roughly doubles the wall-clock time.
+
+For a quick interactive look at the cached datasets, drop into IPython and paste:
 
 ```python
 from src.pipeline.datasets import load_manifest_datasets
@@ -226,6 +230,3 @@ print_probe_table(results)
 
 `src/mlp_test.py` also exposes `run_probes_from_config` which bundles the config
 load, dataset construction, and probe execution in a single call.
-
-The full fine-tune on a RTX 4090 takes roughly 6 hours; building caches and running
-evaluation roughly doubles the wall-clock time.
