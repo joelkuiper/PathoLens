@@ -122,7 +122,6 @@ def evaluate_split_batched(
     y_true: List[int] = []
     y_pred: List[int] = []
     prob_pathogenic: List[float] = []
-    examples: List[Dict[str, Any]] = []
 
     # Batched scoring — matches eval_old path
     for bi in tqdm(range(0, N, batch_size), desc=f"Scoring [{split}]", unit="batch"):
@@ -175,21 +174,6 @@ def evaluate_split_batched(
         y_pred.extend(yhat_batch.tolist())
         prob_pathogenic.extend(np.clip(prob_p, 0.0, 1.0).tolist())
 
-        # log a few examples
-        if len(examples) < 10:
-            for j in range(min(len(batch_idxs), 10 - len(examples))):
-                examples.append(
-                    {
-                        "idx": int(batch_idxs[j]),
-                        "truth": int(y_batch[j]),
-                        "pred": int(yhat_batch[j]),
-                        "probs": {
-                            "Benign": float(prob_b[j]),
-                            "Pathogenic": float(prob_p[j]),
-                        },
-                    }
-                )
-
     # Metrics
     acc = float(np.mean(np.array(y_pred) == np.array(y_true))) if y_true else 0.0
     p, r, f1 = torchmetrics_safe_prf(y_true, y_pred)
@@ -231,7 +215,6 @@ def evaluate_split_batched(
         "auc_pr": auc_pr,
         "confusion_matrix": cm,
         "report": report,
-        "examples": examples,
         "predictions_path": preds_path,
     }
 
