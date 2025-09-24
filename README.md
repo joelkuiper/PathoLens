@@ -44,7 +44,7 @@ By default the code attempts to run VEP through Docker (by pulling the image fro
 When VEP produces multiple transcript consequence annotations for a single variant, we adhere to the following pick order by default: `mane_select, canonical, appris, ccds, rank, tsl, length`.
 
 ### LLM fine-tuning
-The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are **prepended** to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
+The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight **CondProjector** takes the concatenated conditioning vector and runs a minimal MLP (Linear → GELU → Dropout → Linear) to produce **K** virtual token embeddings (default **K = 8**), which are prepended to the chat prompt so the decoder can attend to them at every layer. Fine-tuning uses LoRA adapters on attention and MLP blocks while the base weights stay frozen.
 
 Alongside the tokens, the projector exposes a small **auxiliary classification head**: a single Linear over the flattened projection (`k*d_out → n_classes`). During training we combine the aux-head cross-entropy with the main LM loss (on the label word) using a modest weight. This gives the projector a direct discriminative signal, stabilizes early training, and encourages the projected tokens to be informative. The aux head is **only** a training aid; at inference we ignore it and score purely from the LM by comparing the log-likelihoods of the two label tokens (“Benign” vs “Pathogenic”).
 
@@ -69,73 +69,79 @@ See [mlp_test.py](./src/mlp_test.py). These results demonstrate that there is le
 An earlier version ([3b65d2a](https://github.com/joelkuiper/PathoLens/commit/3b65d2a9859d138cf86adb37cfa9cc711cc6e093)) also used a node2vec embedding derived from the Gene Ontology (GO) and a Gene Annotation File (GAF), however it was decided to drop this feature due to poor performance.
 
 #### LLM Full dataset
+
 **Classification results (Test)**
+
 | Metric    | Value |
-| --------- | ----- |
-| Accuracy  | 0.955 |
-| Precision | 0.911 |
-| Recall    | 0.881 |
-| F1        | 0.896 |
+| --------- | ----: |
+| Accuracy  | 0.950 |
+| Precision | 0.903 |
+| Recall    | 0.869 |
+| F1        | 0.886 |
 | ROC–AUC   | 0.985 |
+| PR–AUC    | 0.959 |
 
 **Confusion matrix (Test)**
+
 |                     | Pred Benign | Pred Pathogenic |
-| ------------------- | ----------- | --------------- |
-| **True Benign**     | 24,682      | 617             |
-| **True Pathogenic** | 856         | 6,313           |
+| ------------------- | ----------: | --------------: |
+| **True Benign**     |      24,626 |             673 |
+| **True Pathogenic** |         936 |           6,233 |
 
+**Ablation results (Validation, n = 5,000)**
 
-**Ablation results (Validation, n = 10,000)**
-| Mode         | Acc    | F1     | ROC–AUC | PR–AUC |
-| ------------ | ------ | ------ | ------- | ------ |
-| cond+prompt  | 0.9392 | 0.8956 | 0.9827  | 0.9661 |
-| cond\_only   | 0.7716 | 0.5388 | 0.7479  | 0.5885 |
-| prompt\_only | 0.9265 | 0.8730 | 0.9763  | 0.9540 |
+| Mode         |    Acc |     F1 | ROC–AUC | PR–AUC |
+| ------------ | -----: | -----: | ------: | -----: |
+| cond+prompt  | 0.9076 | 0.8699 |  0.9719 | 0.9560 |
+| cond\_only   | 0.7556 | 0.6423 |  0.7719 | 0.6727 |
+| prompt\_only | 0.8846 | 0.8259 |  0.9629 | 0.9421 |
 
 Δ vs cond+prompt:
-- cond_only     ΔAcc=-0.1676  ΔF1=-0.3569  ΔROC-AUC=-0.2348  ΔPR-AUC=-0.3776
-- prompt_only   ΔAcc=-0.0127  ΔF1=-0.0226  ΔROC-AUC=-0.0064  ΔPR-AUC=-0.0120
 
-These results show that whilst the model is able to learn the separation between benign and pathogenic, it seems to do this almost exclusively on the prompt (only a small lift in prompt+cond from the ablation probe). The HGVS.p notation seems to carry a considerable amount of signal on its own, based on earlier experiments.
+* cond\_only  ΔAcc = −0.1520, ΔF1 = −0.2276, ΔROC–AUC = −0.1999, ΔPR–AUC = −0.2833
+* prompt\_only ΔAcc = −0.0230, ΔF1 = −0.0439, ΔROC–AUC = −0.0090, ΔPR–AUC = −0.0138
 
-#### LLM missense only
-Focusing on `most_severe_consequence = missense_variant` from VEP we obtain the following results. We emphasize missense variants because they are biologically and clinically the hardest class:
+> Note: On the full dataset the prompt includes short VEP-derived fields (e.g., HGVS, consequence term, amino acids/codons), so prompt-only remains strong; adding conditioning still provides a clear lift.
 
-* **Sheer prevalence** missense substitutions are the single most common type of coding variant in ClinVar and in human genomes.
+#### LLM — Missense only
+
+Focusing on `most_severe_consequence = missense_variant` from VEP we obtain the following results. We emphasize missense variants because they are biologically and clinically an interesting class:
+
+* **Sheer prevalence** missense substitutions are a common type of coding variant in ClinVar and in human genomes.
 * **Ambiguous functional effect**  unlike loss-of-function (nonsense, frameshift, canonical splice) variants, which often have predictable outcomes, missense changes can be benign or highly pathogenic depending on subtle context (conservation, domain, structure, biochemical compatibility).
 * **Limited prompt signal** the HGVS protein notation (e.g. `p.Gly12Asp`) alone does not convey whether the substitution is harmful. Models trained only on text struggle here, tending towards random or majority-class behavior.
 
 By concentrating evaluation on missense variants, we test whether the conditioning path (DNA + protein effect vectors projected into virtual tokens) actually provides *non-trivial discriminative signal*. A lift on this subset is strong evidence that the model is not just memorizing textual heuristics but genuinely leveraging the embeddings.
 
 
-
 **Classification report (Test)**
-|                | precision | recall | f1-score | support |
-|----------------|-----------|--------|----------|---------|
-| **Benign**     | 0.877     | 0.876  | 0.877    | 3117    |
-| **Pathogenic** | 0.812     | 0.814  | 0.813    | 2053    |
-| **accuracy**   |           |        | 0.851    | 5170    |
-| **macro avg**  | 0.845     | 0.845  | 0.845    | 5170    |
-| **weighted avg** | 0.851   | 0.851  | 0.851    | 5170    |
 
-**Confusion Matrix (Test)**
+|                  | precision | recall | f1-score | support |
+| ---------------- | --------: | -----: | -------: | ------: |
+| **Benign**       |     0.877 |  0.876 |    0.877 |    3117 |
+| **Pathogenic**   |     0.812 |  0.814 |    0.813 |    2053 |
+| **accuracy**     |           |        |    0.851 |    5170 |
+| **macro avg**    |     0.845 |  0.845 |    0.845 |    5170 |
+| **weighted avg** |     0.851 |  0.851 |    0.851 |    5170 |
+
+**Confusion matrix (Test)**
 
 |                     | Pred Benign | Pred Pathogenic |
-|---------------------|-------------|-----------------|
-| **True Benign**     | 2730        | 387             |
-| **True Pathogenic** | 382         | 1671            |
+| ------------------- | ----------: | --------------: |
+| **True Benign**     |       2,730 |             387 |
+| **True Pathogenic** |         382 |           1,671 |
 
+**Ablation results (Test, n = 5,170)**
 
-**Ablation test (Test)**
-| Mode           |    N |   Acc  |   F1   | ROC-AUC | PR-AUC |
-|----------------|------|--------|--------|---------|--------|
-| cond+prompt    | 5170 | 0.8507 | 0.8118 |  0.9224 | 0.8972 |
-| cond_only      | 5170 | 0.7062 | 0.4604 |  0.7734 | 0.7223 |
-| prompt_only    | 5170 | 0.8087 | 0.7229 |  0.8897 | 0.8519 |
-| cond+noise     | 5170 | 0.8135 | 0.7382 |  0.8871 | 0.8523 |
-| cond+permute   | 5170 | 0.7768 | 0.7214 |  0.8480 | 0.7819 |
+| Mode         |    Acc |     F1 | ROC–AUC | PR–AUC |
+| ------------ | -----: | -----: | ------: | -----: |
+| cond+prompt  | 0.8507 | 0.8118 |  0.9224 | 0.8972 |
+| cond\_only   | 0.7062 | 0.4604 |  0.7734 | 0.7223 |
+| prompt\_only | 0.8087 | 0.7229 |  0.8897 | 0.8519 |
+| cond+noise   | 0.8135 | 0.7382 |  0.8871 | 0.8523 |
+| cond+permute | 0.7768 | 0.7214 |  0.8480 | 0.7819 |
 
-Here we do observe a lift in performance in `cond+prompt` but the prompt still carries considerable signal (weirdly, since it's just HGVS + Gene symbol). Further investigation is warranted.
+These missense-only ablations show a clear lift from conditioning beyond the (reduced) prompt signal. Further analysis will probe exactly which parts of HGVS (e.g., AA class vs. position) contribute residual signal.
 
 ## Set-up and training
 ### Input
