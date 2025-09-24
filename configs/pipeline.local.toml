@@ -37,12 +37,6 @@ vep_fork = 0
 force_embeddings = false
 force_vep = false
 
-[Train]
-# Placeholder for downstream training choices
-epochs = 1
-batch_size = 64
-lr = 0.0003
-
 [LLM]
 enabled = true
 out_dir = "../artifacts/qwen3"

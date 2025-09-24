@@ -94,14 +94,6 @@ class ProteinConfig:
 
 
 @dataclass
-class TrainConfig:
-    epochs: int = 1
-    batch_size: int = 64
-    lr: float = 3e-4
-    device: Optional[str] = None
-
-
-@dataclass
 class LLMRunConfig:
     enabled: bool = True
     out_dir: Path = Path("artifacts/llm")
@@ -140,7 +132,6 @@ class PipelineConfig:
     paths: PathsConfig
     dna: DNAConfig = field(default_factory=DNAConfig)
     protein: ProteinConfig = field(default_factory=ProteinConfig)
-    train: TrainConfig = field(default_factory=TrainConfig)
     llm: LLMRunConfig = field(default_factory=LLMRunConfig)
     run: RunConfig = field(default_factory=RunConfig)
 
@@ -206,8 +197,6 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         # ensure normalised
         protein.vep_cache_dir = _norm_path(protein.vep_cache_dir)
 
-    train = TrainConfig(**_section(raw, "Train"))
-
     llm_raw = _section(raw, "LLM")
     llm = LLMRunConfig(
         **{
@@ -272,7 +261,6 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         paths=paths,
         dna=dna,
         protein=protein,
-        train=train,
         llm=llm,
         run=run,
     )

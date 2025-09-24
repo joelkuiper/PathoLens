@@ -7,7 +7,6 @@ from .config import (
     PathsConfig,
     DNAConfig,
     ProteinConfig,
-    TrainConfig,
     LLMRunConfig,
     load_pipeline_config,
 )
@@ -21,7 +20,6 @@ __all__ = [
     "PathsConfig",
     "DNAConfig",
     "ProteinConfig",
-    "TrainConfig",
     "LLMRunConfig",
     "load_pipeline_config",
     "PipelineManifest",
