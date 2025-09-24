@@ -350,9 +350,10 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     out_dir.mkdir(parents=True, exist_ok=True)
     set_all_seeds(cfg.seed)
 
-    # Compute *true* conditioning dim from dataset (includes protein if present)
-    D_eff = int(seq_ds["train"].D_eff)
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
+    # Compute conditioning dim from dataset (DNA + protein)
+    train_split = seq_ds["train"]
+    D_eff = int(train_split.D_eff)
+    D_prot = int(train_split.D_prot)
     D_cond = D_eff + D_prot
     print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
 

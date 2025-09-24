@@ -20,6 +20,10 @@ def build_sequence_datasets(
     for split, artifact in manifest.splits.items():
         if not artifact.dna_meta or not artifact.dna_npz:
             raise ValueError(f"Manifest entry for '{split}' missing DNA artifacts")
+        if not artifact.protein_meta or not artifact.protein_npz:
+            raise ValueError(
+                f"Manifest entry for '{split}' missing protein artifacts"
+            )
         ds = SequenceTowerDataset(
             meta_feather=artifact.dna_meta,
             dna_npz=artifact.dna_npz,
@@ -30,7 +34,7 @@ def build_sequence_datasets(
             protein_eff_key="prot_eff",
         )
         datasets[split] = ds
-        total_dim = ds.dna_dim + (ds.protein_dim or 0)
+        total_dim = ds.dna_dim + ds.protein_dim
         print(
             f"[dataset] {split}: rows={len(ds)} dim(dna={ds.dna_dim}, "
             f"protein={ds.protein_dim}) total={total_dim}"

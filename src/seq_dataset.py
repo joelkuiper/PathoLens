@@ -28,18 +28,17 @@ class SequenceTowerDataset(Dataset):
         eff_key: str = "dna_eff",
         make_label: bool = True,
         label_col: str = "_y",
-        # --- optional protein inputs ---
-        protein_meta_feather: Optional[str] = None,
-        protein_npz: Optional[str] = None,
+        # --- protein inputs ---
+        protein_meta_feather: str,
+        protein_npz: str,
         protein_eff_key: str = "prot_eff",
     ):
         # --------- Report the inputs up front ---------
         print("\n[SequenceTowerDataset] constructing...")
         print(_fmt_path(meta_feather, "meta_feather"))
         print(_fmt_path(dna_npz, "dna_npz"))
-        if protein_meta_feather or protein_npz:
-            print(_fmt_path(protein_meta_feather, "protein_meta_feather"))
-            print(_fmt_path(protein_npz, "protein_npz"))
+        print(_fmt_path(protein_meta_feather, "protein_meta_feather"))
+        print(_fmt_path(protein_npz, "protein_npz"))
 
         # ---- main meta (DNA-aligned) ----
         self.meta = pd.read_feather(meta_feather)
@@ -104,90 +103,84 @@ class SequenceTowerDataset(Dataset):
             raise KeyError(f"Label column '{self.label_col}' not found in meta.")
 
 
-        self.prot_eff = None
-        self.D_prot = 0
-        self.protein_dim = 0
-        self._prot_rows = None  # per-sample index into protein array, -1 if missing
-        self.protein_coverage = 0.0
+        # Load protein meta
+        try:
+            pmeta = pd.read_feather(protein_meta_feather)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to read protein meta '{protein_meta_feather}': {e}"
+            ) from e
 
-        if protein_meta_feather is not None and protein_npz is not None:
-            # Load protein meta
-            try:
-                pmeta = pd.read_feather(protein_meta_feather)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to read protein meta '{protein_meta_feather}': {e}"
-                ) from e
-
-            if "id" not in pmeta.columns:
-                raise ValueError(
-                    "protein meta feather must contain 'id' (VariationID as str)"
-                )
-            if "emb_row" not in pmeta.columns:
-                raise ValueError("protein meta feather must contain 'emb_row'")
-
-            pmeta = pmeta.copy()
-            pmeta["id"] = pmeta["id"].astype(str)
-
-            # Choose DNA ids source
-            if "VariationID" in self.meta.columns:
-                ids = self.meta["VariationID"].astype(str)
-                id_source = "meta[VariationID]"
-            else:
-                ids = self.meta["id"].astype(str)
-                id_source = "meta[id]"
-            print(f"[PROT] aligning by {id_source} ↔ protein_meta[id]")
-
-            # Build id -> protein emb_row map
-            id2prow = dict(zip(pmeta["id"].astype(str), pmeta["emb_row"].astype(int)))
-            prow = np.full(len(self.meta), -1, dtype=np.int64)
-            miss_example: list[str] = []
-            for i, vid in enumerate(ids):
-                r = id2prow.get(vid, -1)
-                prow[i] = r
-                if r < 0 and len(miss_example) < 3:
-                    miss_example.append(vid)
-            self._prot_rows = prow
-
-            # load protein arrays (memmap)
-            try:
-                pz = np.load(protein_npz, mmap_mode="r")
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to open protein_npz '{protein_npz}': {e}"
-                ) from e
-
-            if protein_eff_key not in pz.files:
-                raise KeyError(
-                    f"'{protein_eff_key}' not in {protein_npz}. Keys: {list(pz.files)}"
-                )
-            self.prot_eff = pz[protein_eff_key]
-            if self.prot_eff.ndim != 2:
-                raise RuntimeError(
-                    f"protein eff expected 2D array, got {self.prot_eff.ndim}D"
-                )
-            self.D_prot = int(self.prot_eff.shape[1])
-            self.protein_dim = self.D_prot
-
-            cov = int((self._prot_rows >= 0).sum())
-            self.protein_coverage = cov / max(1, len(self.meta))
-            cov_pct = 100.0 * cov / max(1, len(self.meta))
-            print(
-                f"[PROT] coverage: {cov}/{len(self.meta)} ({cov_pct:.1f}%)  "
-                f"shape={tuple(self.prot_eff.shape)} dtype={self.prot_eff.dtype}"
+        if "id" not in pmeta.columns:
+            raise ValueError(
+                "protein meta feather must contain 'id' (VariationID as str)"
             )
-            if cov < len(self.meta):
-                print(f"[PROT] first missing ids (up to 3): {miss_example or '—'}")
+        if "emb_row" not in pmeta.columns:
+            raise ValueError("protein meta feather must contain 'emb_row'")
 
+        pmeta = pmeta.copy()
+        pmeta["id"] = pmeta["id"].astype(str)
+
+        # Choose DNA ids source
+        if "VariationID" in self.meta.columns:
+            ids = self.meta["VariationID"].astype(str)
+            id_source = "meta[VariationID]"
         else:
-            print("[PROT] not provided (skipping protein features)")
-            self.D_prot = 0
-            self.protein_dim = 0
-            self.protein_coverage = 0.0
+            ids = self.meta["id"].astype(str)
+            id_source = "meta[id]"
+        print(f"[PROT] aligning by {id_source} ↔ protein_meta[id]")
+
+        # Build id -> protein emb_row map
+        id2prow = dict(zip(pmeta["id"].astype(str), pmeta["emb_row"].astype(int)))
+        prow = np.full(len(self.meta), -1, dtype=np.int64)
+        missing: list[str] = []
+        for i, vid in enumerate(ids):
+            r = id2prow.get(vid, -1)
+            prow[i] = r
+            if r < 0 and len(missing) < 3:
+                missing.append(vid)
+
+        if np.any(prow < 0):
+            total_missing = int(np.sum(prow < 0))
+            example = ", ".join(missing) if missing else "?"
+            raise RuntimeError(
+                "Protein embeddings missing for "
+                f"{total_missing}/{len(self.meta)} samples. "
+                f"Example IDs: {example}"
+            )
+        self._prot_rows = prow
+
+        # load protein arrays (memmap)
+        try:
+            pz = np.load(protein_npz, mmap_mode="r")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to open protein_npz '{protein_npz}': {e}"
+            ) from e
+
+        if protein_eff_key not in pz.files:
+            raise KeyError(
+                f"'{protein_eff_key}' not in {protein_npz}. Keys: {list(pz.files)}"
+            )
+        self.prot_eff = pz[protein_eff_key]
+        if self.prot_eff.ndim != 2:
+            raise RuntimeError(
+                f"protein eff expected 2D array, got {self.prot_eff.ndim}D"
+            )
+        self.D_prot = int(self.prot_eff.shape[1])
+        self.protein_dim = self.D_prot
+
+        cov = int((self._prot_rows >= 0).sum())
+        self.protein_coverage = cov / max(1, len(self.meta))
+        cov_pct = 100.0 * self.protein_coverage
+        print(
+            f"[PROT] coverage: {cov}/{len(self.meta)} ({cov_pct:.1f}%)  "
+            f"shape={tuple(self.prot_eff.shape)} dtype={self.prot_eff.dtype}"
+        )
 
         # Final layout summary
-        total_D = self.D_eff + (self.D_prot or 0)
-        self.protein_dim = self.D_prot or 0
+        total_D = self.D_eff + self.D_prot
+        self.protein_dim = self.D_prot
         self.dna_dim = self.D_eff
         print(
             f"[SequenceTowerDataset] feature layout: "
@@ -208,14 +201,14 @@ class SequenceTowerDataset(Dataset):
         eff_np = np.asarray(self.dna_eff[r], dtype="float32", order="C")  # (D_eff,)
         parts = [eff_np]
 
-        # Protein eff (zeros if not aligned)
-        if self.prot_eff is not None and self._prot_rows is not None:
-            pr = int(self._prot_rows[idx])
-            if pr >= 0:
-                prot_np = np.asarray(self.prot_eff[pr], dtype="float32", order="C")
-            else:
-                prot_np = np.zeros((self.D_prot,), dtype="float32")
-            parts.append(prot_np)
+        # Protein eff (always present)
+        if self._prot_rows is None:
+            raise RuntimeError("Protein row indices not initialized")
+        pr = int(self._prot_rows[idx])
+        if pr < 0:
+            raise RuntimeError(f"Missing protein embedding for idx={idx}")
+        prot_np = np.asarray(self.prot_eff[pr], dtype="float32", order="C")
+        parts.append(prot_np)
 
         x_np = np.concatenate(parts, axis=0).astype("float32", copy=False)
         x = torch.from_numpy(x_np)

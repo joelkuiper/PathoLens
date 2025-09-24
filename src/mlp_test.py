@@ -10,10 +10,10 @@ Trains a small MLP on features from SequenceTowerDataset and evaluates:
   - dna+prot
 
 Assumes SequenceTowerDataset packs features in this order per sample:
-  [ dna_eff | (optional) prot_eff ]
+  [ dna_eff | prot_eff ]
 
 Relies on dataset attributes:
-  ds.D_eff, ds.D_prot (0 if protein was not provided)
+  ds.D_eff, ds.D_prot
 
 Usage:
     from src.mlp_test import run_ablation_probes, print_probe_table
@@ -118,11 +118,9 @@ def _feat_matrix(split, desc) -> Tuple[np.ndarray, np.ndarray]:
 
 def _slice_blocks(
     X: np.ndarray, D_eff: int, D_prot: int
-) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+) -> Tuple[np.ndarray, np.ndarray]:
     dna = X[:, :D_eff]
-    prot = None
-    if D_prot and D_prot > 0:
-        prot = X[:, D_eff : D_eff + D_prot]
+    prot = X[:, D_eff : D_eff + D_prot]
     return dna, prot
 
 
@@ -177,7 +175,7 @@ def _run_single_probe(
     np.random.seed(seed)
 
     D_eff = int(seq_ds["train"].D_eff)
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
+    D_prot = int(seq_ds["train"].D_prot)
 
     # pull features
     Xtr_all, ytr = _feat_matrix(seq_ds["train"], "[train]")
@@ -189,7 +187,7 @@ def _run_single_probe(
     te_dna, te_prot = _slice_blocks(Xt_all, D_eff, D_prot)
 
     use_dna = feat_mode in ("dna", "dna+prot")
-    use_prot = feat_mode in ("prot", "dna+prot") and D_prot > 0
+    use_prot = feat_mode in ("prot", "dna+prot")
 
     # z-score each active block separately (fit on train)
     def zfit(X):
@@ -205,8 +203,6 @@ def _run_single_probe(
         va_dna = zapply(va_dna, sc_dna)
         te_dna = zapply(te_dna, sc_dna)
     if use_prot:
-        if tr_prot is None:
-            raise ValueError("Protein features requested but unavailable in dataset")
         tr_prot, sc_pr = zfit(tr_prot)
         va_prot = zapply(va_prot, sc_pr)
         te_prot = zapply(te_prot, sc_pr)
@@ -215,7 +211,7 @@ def _run_single_probe(
         parts: List[np.ndarray] = []
         if use_dna:
             parts.append(A)
-        if use_prot and C is not None:
+        if use_prot:
             parts.append(C)
         if not parts:
             raise ValueError(f"No features selected for mode '{feat_mode}'")
@@ -372,10 +368,8 @@ def run_ablation_probes(
     """
     Run a grid of ablation probes. Returns {mode: result_dict}.
     """
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-    default_modes = ["dna"]
-    if D_prot > 0:
-        default_modes += ["prot", "dna+prot"]
+    D_prot = int(seq_ds["train"].D_prot)
+    default_modes = ["dna", "prot", "dna+prot"]
     if modes is None:
         modes = default_modes
 

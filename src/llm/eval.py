@@ -296,8 +296,9 @@ def evaluate_split_batched(
     adapter_dir = os.path.join(out_dir, "adapter")
     projector_path = os.path.join(out_dir, "projector")
 
-    D_eff = int(seq_ds["train"].D_eff)
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
+    train_split = seq_ds["train"]
+    D_eff = int(train_split.D_eff)
+    D_prot = int(train_split.D_prot)
     D_cond = D_eff + D_prot
     print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
 

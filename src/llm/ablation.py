@@ -350,8 +350,8 @@ def run_prompt_vs_cond_ablation(
     Evaluates:
       - cond only         (prompt blanked; conditioning present)
       - cond+prompt       (baseline; conditioning + prompt)
-      - cond_zero_dna     (conditioning DNA block zeroed; if present)
-      - cond_zero_prot    (conditioning protein block zeroed; if present)
+      - cond_zero_dna     (conditioning DNA block zeroed)
+      - cond_zero_prot    (conditioning protein block zeroed)
       - prompt only       (conditioning zeroed entirely)
       - prompt_no_hgvsp   (prompt intact minus HGVS.p)
       - prompt_no_hgvsc   (prompt intact minus HGVS.c)
@@ -366,8 +366,10 @@ def run_prompt_vs_cond_ablation(
     results: Dict[str, dict] = {}
 
     train_split = seq_ds.get("train")
-    D_eff = int(getattr(train_split, "D_eff", 0) or 0) if train_split is not None else 0
-    D_prot = int(getattr(train_split, "D_prot", 0) or 0) if train_split is not None else 0
+    if train_split is None:
+        raise ValueError("Sequence dataset missing 'train' split for ablation")
+    D_eff = int(train_split.D_eff)
+    D_prot = int(train_split.D_prot)
 
     # --- cond only (blank prompts) ---
     print("\n[ABL] cond only (prompts blanked)")
@@ -411,18 +413,17 @@ def run_prompt_vs_cond_ablation(
         results["cond_zero_dna"] = out
 
     # --- cond_zero_prot (zero only protein features) ---
-    if D_prot > 0:
-        print("\n[ABL] cond_zero_prot (conditioning: zero protein block)")
-        view_zero_prot = _with_cond_zero_ranges(seq_ds, [(D_eff, D_eff + D_prot)])
-        out = evaluate_split_batched(
-            view_zero_prot,
-            out_dir=out_dir,
-            split=split,
-            max_n=max_n,
-            batch_size=batch_size,
-            sample_rationales=0,
-        )
-        results["cond_zero_prot"] = out
+    print("\n[ABL] cond_zero_prot (conditioning: zero protein block)")
+    view_zero_prot = _with_cond_zero_ranges(seq_ds, [(D_eff, D_eff + D_prot)])
+    out = evaluate_split_batched(
+        view_zero_prot,
+        out_dir=out_dir,
+        split=split,
+        max_n=max_n,
+        batch_size=batch_size,
+        sample_rationales=0,
+    )
+    results["cond_zero_prot"] = out
 
     # --- prompt only (conditioning removed) ---
     print("\n[ABL] prompt only (conditioning zeroed)")
