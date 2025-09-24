@@ -18,9 +18,6 @@ from src.llm.load import load_finetuned_model
 from src.llm.modeling import enable_fast_generate
 from .context import build_ctx_from_row
 
-# --- Debug env toggles ---
-_ENV_PROBE = os.environ.get("PATHOLENS_PROBE_PROMPTS", "0") == "1"
-
 # Regexes used to sanity-check that the prompt actually looks blank
 _RX_HGVS_P = re.compile(r"(?i)\bp\.(?!\[)[A-Za-z0-9_=*]+")
 _RX_HGVS_C = re.compile(r"(?i)\bc\.(?!\[)[A-Za-z0-9_+\-*>=<]+")
@@ -108,26 +105,10 @@ def _sha10(s: str) -> str:
 
 
 @torch.inference_mode()
-def _prep_inputs_embeds(
-    model, tokenizer, prompts: List[str], cond_vecs: np.ndarray, *, debug_probe=False
-):
-    # Optional: probe raw prompts before tokenization
-    if debug_probe or _ENV_PROBE:
-        _probe_prompt_strings(prompts, tag="prompt-probe(raw)")
-
+def _prep_inputs_embeds(model, tokenizer, prompts: List[str], cond_vecs: np.ndarray):
     enc = _apply_chat_template(tokenizer, prompts)
     dev = next(model.parameters()).device
     enc = {k: v.to(dev) for k, v in enc.items()}
-
-    # Optional: probe token lengths
-    if debug_probe or _ENV_PROBE:
-        attn = enc["attention_mask"].cpu().numpy()
-        toks = enc["input_ids"].cpu().numpy()
-        tok_lens = attn.sum(axis=1).tolist()
-        print(
-            f"[prompt-probe(tok)] batches={len(tok_lens)} "
-            f"tok_len[min/med/max]={min(tok_lens)}/{int(np.median(tok_lens))}/{max(tok_lens)}"
-        )
 
     E = model.get_input_embeddings()
     txt_emb = E(enc["input_ids"])  # [B,T,H]
@@ -150,7 +131,7 @@ def _batched_label_logprobs(
 ) -> np.ndarray:
     """
     Teacher-forced scoring on the PROMPT side (append candidate label tokens
-    to prompt+cond embeddings; score next-token logprobs). Matches eval_old.
+    to prompt+cond embeddings; score next-token logprobs).
     """
     dev = inputs_embeds.device
     E = model.get_input_embeddings()
@@ -301,7 +282,6 @@ def evaluate_split_batched(
     rationale_temp: float = 0.9,
     rationale_top_p: float = 0.92,
     guard_prompts: bool = True,
-    debug_prompt_probe: bool = False,
 ) -> Dict[str, Any]:
     """
     IMPORTANT: We do NOT insert ground-truth anywhere into the prompt or scoring.
@@ -335,24 +315,6 @@ def evaluate_split_batched(
     if N == 0:
         return {"n": 0, "note": f"No samples in split '{split}'."}
 
-    # (Optional) sanity guard: no explicit label words in prompts; also probe HGVS content
-    if guard_prompts or debug_prompt_probe or _ENV_PROBE:
-        leaks = 0
-        hg_hits = 0
-        probe_prompts: List[str] = []
-        cap = min(2000, len(idxs))
-        for i in idxs[:cap]:
-            ctx = build_ctx_from_row(ds.meta.iloc[i])
-            p = PROMPT_TMPL.format(ctx=ctx)
-            if ("Benign" in p) or ("Pathogenic" in p):
-                leaks += 1
-            if _RX_HGVS_C.search(p) or _RX_HGVS_P.search(p):
-                hg_hits += 1
-            probe_prompts.append(p)
-        assert leaks == 0, f"Prompt leakage: {leaks} prompts include label words."
-        if debug_prompt_probe or _ENV_PROBE:
-            _probe_prompt_strings(probe_prompts[:64], tag="prompt-probe(prebatch)")
-
     # Prepare tokenizations for labels once
     cand = {
         "Benign": _encode_label_variants(tok, "Benign"),
@@ -385,15 +347,8 @@ def evaluate_split_batched(
             prompts.append(PROMPT_TMPL.format(ctx=ctx))
             y_batch.append(int(ds.meta.iloc[i]["_y"]))
 
-        # One-off: deeper probe for the first batch actually used
-        if (debug_prompt_probe or _ENV_PROBE) and not first_batch_done:
-            _probe_prompt_strings(prompts, tag="prompt-probe(batch0)")
-            first_batch_done = True
-
         conds = np.stack(conds, axis=0)
-        inp_emb, attn = _prep_inputs_embeds(
-            model, tok, prompts, conds, debug_probe=(debug_prompt_probe or _ENV_PROBE)
-        )
+        inp_emb, attn = _prep_inputs_embeds(model, tok, prompts, conds)
 
         # Teacher-forced label logprobs
         lp_b_list, lp_p_list = [], []
@@ -498,7 +453,7 @@ def evaluate_split_batched(
             prompt = PROMPT_TMPL.format(ctx=ctx)
 
             inp_emb, attn = _prep_inputs_embeds(
-                model, tok, [prompt], cond_vec[np.newaxis, :], debug_probe=False
+                model, tok, [prompt], cond_vec[np.newaxis, :]
             )
             best_b = max(
                 (
