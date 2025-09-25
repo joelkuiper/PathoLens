@@ -88,8 +88,8 @@ def _filter_splits_by_consequence(
             )
             filtered_tables[split] = table
             continue
-        table_mask = table["most_severe_consequence"].astype("string").fillna("").isin(
-            allowed
+        table_mask = (
+            table["most_severe_consequence"].astype("string").fillna("").isin(allowed)
         )
         filtered_tables[split] = table[table_mask].reset_index(drop=True)
 
@@ -152,9 +152,7 @@ def _prepare_filtered_clinvar(
             list_repr,
         )
         splits = {name: pd.read_feather(path) for name, path in split_paths.items()}
-        vep_tables = {
-            name: pd.read_feather(path) for name, path in vep_paths.items()
-        }
+        vep_tables = {name: pd.read_feather(path) for name, path in vep_paths.items()}
         return splits, split_paths, vep_paths, vep_tables
 
     if not cfg.paths.clinvar.exists():
@@ -313,18 +311,21 @@ def main() -> None:
     run_llm_pipeline(llm_cfg, seq_datasets)
     print("[done] training complete")
 
-    print("[llm] running evaluation")
-    llm_eval.run_all(seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id)
+    # print("[llm] running evaluation")
+    # llm_eval.run_all(seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id)
 
     print("[llm] running ablation test")
     import src.llm.ablation as ablation
 
     ablation.run_prompt_vs_cond_ablation(
         seq_datasets,
-        out_dir=str(out_dir),
-        split="val",
-        max_n=5_000,
+        out_dir="artifacts/qwen3/",
+        split="test",
         batch_size=128,
+        # max_n = 5_000,
+        scale_sweep=(),
+        do_permute=False,
+        do_pure_noise=False,
     )
 
 

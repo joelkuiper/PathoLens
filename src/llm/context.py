@@ -83,7 +83,9 @@ def build_ctx_from_row(row) -> str:
     if hgvsp:
         lines.append(f"HGVS.p: {hgvsp}")
 
-    # most = _clean_str(_get_value(row, "most_severe_consequence")).replace("_", " ")
+    most = _clean_str(_get_value(row, "most_severe_consequence")).replace("_", " ")
+    lines.append(f"Most severe consequence: {most}")
+
     # impact_raw = _clean_str(_get_value(row, "impact"))
     # impact = impact_raw.title() if impact_raw else ""
     # if most and impact:
@@ -93,9 +95,9 @@ def build_ctx_from_row(row) -> str:
     # elif impact:
     #     lines.append(f"Impact: {impact}")
 
-    # terms_fmt = _format_terms(_coalesce(row, ["consequence_terms"]))
-    # if terms_fmt and terms_fmt.lower() != most.lower():
-    #     lines.append(f"Consequence terms: {terms_fmt}")
+    terms_fmt = _format_terms(_coalesce(row, ["consequence_terms"]))
+    if terms_fmt and terms_fmt.lower() != most.lower():
+        lines.append(f"Consequence terms: {terms_fmt}")
 
     # variant = _coalesce(row, ["variant_allele"])
     # if variant:

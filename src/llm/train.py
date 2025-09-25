@@ -84,6 +84,19 @@ class CondTrainer(Trainer):
             persistent_workers=self.args.dataloader_persistent_workers,
         )
 
+    @staticmethod
+    def _first_label_index(label_weights: torch.Tensor) -> torch.Tensor:
+        """
+        Given label_weights [B, T], return a LongTensor [B] with the index
+        of the first supervised (weight > 0) position. If none found, returns T.
+        """
+        B, T = label_weights.shape
+        mask = (label_weights > 0).to(label_weights.dtype)  # [B, T]
+        first_idx = torch.argmax(mask, dim=1)  # [B]
+        has_pos = mask.max(dim=1).values > 0
+        first_idx = torch.where(has_pos, first_idx, torch.full_like(first_idx, T))
+        return first_idx.long()
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         # -------------------
         # Unpack inputs
@@ -94,9 +107,11 @@ class CondTrainer(Trainer):
         labels = inputs.pop("labels", None)
         label_weights = inputs.pop("label_weights", None)
         cond_vec = inputs.pop("cond_vec")
-        gold_y = inputs.pop("_y", None)  # sequence-level class label
+        gold_y = inputs.pop("_y", None)
         if gold_y is None:
-            raise KeyError("CondTrainer.compute_loss requires '_y' labels in the batch.")
+            raise KeyError(
+                "CondTrainer.compute_loss requires '_y' labels in the batch."
+            )
         if not torch.is_tensor(gold_y):
             gold_y = torch.as_tensor(gold_y)
         if gold_y.dtype != torch.long:
@@ -104,7 +119,7 @@ class CondTrainer(Trainer):
                 f"CondTrainer expects '_y' dtype torch.long but received {gold_y.dtype}."
             )
 
-        # ===== fast dimension guard (catches dataset/model mismatch) =====
+        # ===== fast dimension guard  =====
         cond_proj = getattr(model, "cond_projector", None)
         expected_d = getattr(cond_proj, "d_in", None)
         if expected_d is not None:
@@ -116,7 +131,6 @@ class CondTrainer(Trainer):
                     "Check D_eff/D_prot in dataset vs projector build."
                 )
 
-        # default attention mask if missing
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
@@ -127,15 +141,12 @@ class CondTrainer(Trainer):
         txt_emb = tok_emb(input_ids)
         cond_vec = cond_vec.to(device=txt_emb.device, dtype=txt_emb.dtype)
 
-        # cond_vec = cond_vec / (cond_vec.norm(dim=-1, keepdim=True) + 1e-6)
-
-        # Projector returns: cond tokens, aux logits
-        cond_emb, aux_logits = model.cond_projector(cond_vec)  # (B, K, H), (B, 2)
+        # Projector
+        cond_emb, aux_logits = model.cond_projector(cond_vec)
         if aux_logits is None:
             raise RuntimeError(
                 "cond_projector must return auxiliary logits when '_y' supervision is provided."
             )
-
         if gold_y.ndim == 0:
             gold_y = gold_y.unsqueeze(0)
         if gold_y.ndim != 1:
@@ -143,19 +154,28 @@ class CondTrainer(Trainer):
                 f"CondTrainer expects '_y' to be 1-D (batch,), got shape {tuple(gold_y.shape)}."
             )
 
-        # ===== PROMPT DROPOUT =====
+        # ===== PROMPT DROPOUT  =====
         p_drop = float(getattr(model, "prompt_dropout_prob", 0.0))
-        if p_drop > 0.0 and model.training:
-            B = txt_emb.size(0)
+        if p_drop > 0.0 and model.training and (label_weights is not None):
+            B, T = txt_emb.shape[:2]
             drop_mask = torch.rand(B, device=txt_emb.device) < p_drop
             if drop_mask.any():
+                first_label_idx = self._first_label_index(label_weights).to(
+                    txt_emb.device
+                )  # [B]
                 txt_emb = txt_emb.clone()
-                txt_emb[drop_mask] = 0.0
+                attention_mask = attention_mask.clone()
+                for b in torch.nonzero(drop_mask, as_tuple=False).flatten():
+                    s = int(first_label_idx[b].item())
+                    if s > 0:
+                        # zero the prompt embeddings and make them non-attendable
+                        txt_emb[b, :s, :] = 0.0
+                        attention_mask[b, :s] = 0
 
-        # concat cond tokens before text tokens
+        # -------------------
+        # Concat cond + text, extend masks/labels
+        # -------------------
         inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
-
-        # extend masks/labels to account for cond tokens
         if attention_mask is not None:
             B, K = attention_mask.size(0), cond_emb.size(1)
             ones = torch.ones(
@@ -173,13 +193,12 @@ class CondTrainer(Trainer):
             )
             label_weights = torch.cat([zeros, label_weights], dim=1)
 
-        # optional position ids
         pos_ids = torch.arange(
             inputs_embeds.size(1), device=inputs_embeds.device
         ).unsqueeze(0)
 
         # -------------------
-        # Forward through model
+        # Forward + losses
         # -------------------
         out = model(
             inputs_embeds=inputs_embeds,
@@ -189,9 +208,6 @@ class CondTrainer(Trainer):
         )
         logits = out.logits
 
-        # -------------------
-        # LM loss
-        # -------------------
         if labels is None:
             lm_loss = (
                 out.loss
@@ -217,27 +233,18 @@ class CondTrainer(Trainer):
             if torch.isnan(lm_loss) or torch.isinf(lm_loss):
                 lm_loss = torch.zeros((), device=logits.device, dtype=logits.dtype)
 
-        # -------------------
-        # Aux classification loss
-        # -------------------
         aux_loss = None
         if gold_y is not None:
             gold_y = gold_y.to(aux_logits.device)
             if gold_y.shape[0] != aux_logits.size(0):
                 raise ValueError(
-                    "Batch size mismatch between auxiliary logits and '_y' labels." 
-                    f"Got {aux_logits.size(0)} logits vs {gold_y.shape[0]} labels."
+                    "Batch size mismatch between auxiliary logits and '_y' labels."
+                    f" Got {aux_logits.size(0)} logits vs {gold_y.shape[0]} labels."
                 )
             aux_loss = F.cross_entropy(aux_logits, gold_y)
 
-        # -------------------
-        # Total loss
-        # -------------------
         lambda_aux = float(getattr(model, "aux_loss_weight", 1.0))
-        if aux_loss is not None:
-            total_loss = lm_loss + lambda_aux * aux_loss
-        else:
-            total_loss = lm_loss
+        total_loss = lm_loss + (lambda_aux * aux_loss if aux_loss is not None else 0.0)
 
         if model.training and aux_loss is not None:
             self._update_aux_metrics(aux_loss, aux_logits, gold_y)
@@ -357,8 +364,7 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     D_prot = int(train_split.D_prot)
     D_cond = D_eff + D_go + D_prot
     print(
-        "[INFO] LLM pipeline: "
-        f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
+        "[INFO] LLM pipeline: " f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
     )
 
     # build model with matching projector input
