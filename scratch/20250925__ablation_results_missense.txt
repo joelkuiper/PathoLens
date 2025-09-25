@@ -1,0 +1,24 @@
+Ablation summary [test, n=5170, y_pathogenic=2053, y_benign=3117]
+Mode                N      Acc       F1    ROC-AUC     PR-AUC
+------------------------------------------------------
+cond+prompt      5170   0.8660   0.8270     0.9258     0.8999
+cond_only        5170   0.6876   0.3796     0.7651     0.7182
+cond_zero_dna    5170   0.8673   0.8277     0.9279     0.9024
+cond_zero_prot   5170   0.8315   0.7691     0.8987     0.8557
+cond_zero_go     5170   0.8431   0.7791     0.9187     0.8943
+prompt_only      5170   0.7890   0.6658     0.8867     0.8520
+prompt_no_hgvsp   5170   0.8418   0.7774     0.9093     0.8746
+prompt_no_hgvsc   5170   0.8609   0.8162     0.9244     0.8995
+prompt_no_gene   5170   0.7530   0.6564     0.8068     0.7592
+cond+noise       5170   0.7876   0.7269     0.8554     0.8024
+
+Δ vs cond+prompt:
+- cond_only     ΔAcc=-0.1783  ΔF1=-0.4474  ΔROC-AUC=-0.1607  ΔPR-AUC=-0.1817
+- cond_zero_dna  ΔAcc=+0.0014  ΔF1=+0.0008  ΔROC-AUC=+0.0021  ΔPR-AUC=+0.0025
+- cond_zero_prot  ΔAcc=-0.0344  ΔF1=-0.0578  ΔROC-AUC=-0.0271  ΔPR-AUC=-0.0442
+- cond_zero_go  ΔAcc=-0.0228  ΔF1=-0.0479  ΔROC-AUC=-0.0071  ΔPR-AUC=-0.0056
+- prompt_only   ΔAcc=-0.0770  ΔF1=-0.1611  ΔROC-AUC=-0.0390  ΔPR-AUC=-0.0480
+- prompt_no_hgvsp  ΔAcc=-0.0242  ΔF1=-0.0496  ΔROC-AUC=-0.0164  ΔPR-AUC=-0.0253
+- prompt_no_hgvsc  ΔAcc=-0.0050  ΔF1=-0.0108  ΔROC-AUC=-0.0014  ΔPR-AUC=-0.0004
+- prompt_no_gene  ΔAcc=-0.1130  ΔF1=-0.1705  ΔROC-AUC=-0.1189  ΔPR-AUC=-0.1407
+- cond+noise    ΔAcc=-0.0783  ΔF1=-0.1001  ΔROC-AUC=-0.0704  ΔPR-AUC=-0.0976
