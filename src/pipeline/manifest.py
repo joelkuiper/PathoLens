@@ -44,6 +44,7 @@ class SplitArtifact:
 
 @dataclass
 class PipelineManifest:
+    go_npz: Optional[str]
     splits: Dict[str, SplitArtifact]
     created_at: str = field(
         default_factory=lambda: datetime.utcnow().replace(microsecond=0).isoformat()
@@ -51,11 +52,14 @@ class PipelineManifest:
     extras: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "created_at": self.created_at,
             "splits": {k: v.to_dict() for k, v in self.splits.items()},
             "extras": self.extras,
         }
+        if self.go_npz:
+            data["go"] = {"npz": self.go_npz}
+        return data
 
     def dump(self, path: str | Path) -> Path:
         p = Path(path)
@@ -71,14 +75,25 @@ class PipelineManifest:
         p = Path(path)
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
+        go_block = data.get("go", {}) or {}
+        go_npz = go_block.get("npz")
         splits_dict = {
             name: SplitArtifact.from_dict(block)
             for name, block in data.get("splits", {}).items()
         }
         extras = data.get("extras", {})
-        go_block = data.get("go")
-        if go_block:
-            extras = dict(extras) if isinstance(extras, dict) else {}
-            extras.setdefault("legacy", {})["go"] = go_block
+        if not go_npz and isinstance(extras, dict):
+            go_npz = (
+                extras.get("legacy", {})
+                .get("go", {})
+                .get("npz")
+            )
         created_at = data.get("created_at") or datetime.utcnow().isoformat()
-        return cls(splits=splits_dict, created_at=created_at, extras=extras)
+        if not go_npz:
+            raise ValueError(f"Manifest {p} missing GO embedding reference")
+        return cls(
+            go_npz=str(go_npz),
+            splits=splits_dict,
+            created_at=created_at,
+            extras=extras,
+        )

@@ -7,7 +7,12 @@ from typing import Any, Dict, Optional, Sequence, Match
 import numpy as np
 import torch
 
-from .config import BIN_LABELS, CHAT_SYSTEM
+from .config import (
+    BIN_LABELS,
+    CHAT_SYSTEM,
+    COND_START_TOKEN,
+    COND_END_TOKEN,
+)
 from .chat import build_chat_strings, sanitize_model_text
 
 
@@ -74,11 +79,24 @@ def prepare_prompt_embeddings(
     cond_tensor = torch.from_numpy(cond).to(dev, dtype=txt_emb.dtype)  # [B, D]
     cond_emb, _ = model.cond_projector(cond_tensor)  # [B, K, H]
 
-    inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
+    def _single_token_embedding(token: str) -> torch.Tensor:
+        ids = tokenizer.encode(token, add_special_tokens=False)
+        if len(ids) != 1:
+            raise ValueError(f"Tokenizer must map '{token}' to exactly one id; got {ids}")
+        token_id = torch.tensor(ids, device=dev)
+        emb = E(token_id).unsqueeze(0)  # [1, 1, H]
+        return emb.expand(txt_emb.size(0), -1, -1)
+
+    start_emb = _single_token_embedding(COND_START_TOKEN)
+    end_emb = _single_token_embedding(COND_END_TOKEN)
+
+    inputs_embeds = torch.cat([start_emb, cond_emb, end_emb, txt_emb], dim=1)
     attn = enc["attention_mask"]
-    B, K = attn.size(0), cond_emb.size(1)
-    ones = torch.ones((B, K), dtype=attn.dtype, device=attn.device)
-    attn = torch.cat([ones, attn], dim=1)
+    B = attn.size(0)
+    ones_start = torch.ones((B, start_emb.size(1)), dtype=attn.dtype, device=attn.device)
+    ones_cond = torch.ones((B, cond_emb.size(1)), dtype=attn.dtype, device=attn.device)
+    ones_end = torch.ones((B, end_emb.size(1)), dtype=attn.dtype, device=attn.device)
+    attn = torch.cat([ones_start, ones_cond, ones_end, attn], dim=1)
     return inputs_embeds, attn
 
 

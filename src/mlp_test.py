@@ -6,14 +6,19 @@ Ablation MLP probe for PathoLens
 
 Trains a small MLP on features from SequenceTowerDataset and evaluates:
   - dna
+  - go
   - prot
+  - dna+go
+  - go+prot
   - dna+prot
+  - dna+go+prot
+  - dna+zero-go (GO block zeroed to test ablation)
 
 Assumes SequenceTowerDataset packs features in this order per sample:
-  [ dna_eff | prot_eff ]
+  [ dna_eff | go_vec | prot_eff ]
 
 Relies on dataset attributes:
-  ds.D_eff, ds.D_prot
+  ds.D_eff, ds.D_go, ds.D_prot
 
 Usage:
     from src.mlp_test import run_ablation_probes, print_probe_table
@@ -117,11 +122,12 @@ def _feat_matrix(split, desc) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _slice_blocks(
-    X: np.ndarray, D_eff: int, D_prot: int
-) -> Tuple[np.ndarray, np.ndarray]:
+    X: np.ndarray, D_eff: int, D_go: int, D_prot: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     dna = X[:, :D_eff]
-    prot = X[:, D_eff : D_eff + D_prot]
-    return dna, prot
+    go = X[:, D_eff : D_eff + D_go]
+    prot = X[:, D_eff + D_go : D_eff + D_go + D_prot]
+    return dna, go, prot
 
 
 # --------------------------
@@ -175,19 +181,41 @@ def _run_single_probe(
     np.random.seed(seed)
 
     D_eff = int(seq_ds["train"].D_eff)
-    D_prot = int(seq_ds["train"].D_prot)
+    D_go = int(getattr(seq_ds["train"], "D_go", 0) or 0)
+    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
 
     # pull features
     Xtr_all, ytr = _feat_matrix(seq_ds["train"], "[train]")
     Xv_all, yv = _feat_matrix(seq_ds["val"], "[val]")
     Xt_all, yt = _feat_matrix(seq_ds["test"], "[test]")
 
-    tr_dna, tr_prot = _slice_blocks(Xtr_all, D_eff, D_prot)
-    va_dna, va_prot = _slice_blocks(Xv_all, D_eff, D_prot)
-    te_dna, te_prot = _slice_blocks(Xt_all, D_eff, D_prot)
+    tr_dna, tr_go, tr_prot = _slice_blocks(Xtr_all, D_eff, D_go, D_prot)
+    va_dna, va_go, va_prot = _slice_blocks(Xv_all, D_eff, D_go, D_prot)
+    te_dna, te_go, te_prot = _slice_blocks(Xt_all, D_eff, D_go, D_prot)
 
-    use_dna = feat_mode in ("dna", "dna+prot")
-    use_prot = feat_mode in ("prot", "dna+prot")
+    use_dna = feat_mode in (
+        "dna",
+        "dna+go",
+        "dna+prot",
+        "dna+go+prot",
+        "dna+zero-go",
+    )
+    use_go = feat_mode in (
+        "go",
+        "dna+go",
+        "go+prot",
+        "dna+go+prot",
+        "dna+zero-go",
+    )
+    zero_go = "zero-go" in feat_mode
+    if zero_go:
+        use_go = True
+    use_prot = feat_mode in ("prot", "dna+prot", "go+prot", "dna+go+prot")
+
+    if use_go and D_go <= 0:
+        raise ValueError("GO features requested but dataset lacks GO embeddings")
+    if use_prot and D_prot <= 0:
+        raise ValueError("Protein features requested but dataset lacks protein embeddings")
 
     # z-score each active block separately (fit on train)
     def zfit(X):
@@ -202,15 +230,25 @@ def _run_single_probe(
         tr_dna, sc_dna = zfit(tr_dna)
         va_dna = zapply(va_dna, sc_dna)
         te_dna = zapply(te_dna, sc_dna)
+    if use_go:
+        tr_go, sc_go = zfit(tr_go)
+        va_go = zapply(va_go, sc_go)
+        te_go = zapply(te_go, sc_go)
+        if zero_go:
+            tr_go = np.zeros_like(tr_go)
+            va_go = np.zeros_like(va_go)
+            te_go = np.zeros_like(te_go)
     if use_prot:
         tr_prot, sc_pr = zfit(tr_prot)
         va_prot = zapply(va_prot, sc_pr)
         te_prot = zapply(te_prot, sc_pr)
 
-    def assemble(A, C):
+    def assemble(A, B, C):
         parts: List[np.ndarray] = []
         if use_dna:
             parts.append(A)
+        if use_go:
+            parts.append(B)
         if use_prot:
             parts.append(C)
         if not parts:
@@ -219,9 +257,9 @@ def _run_single_probe(
             return parts[0]
         return np.concatenate(parts, axis=1)
 
-    Xtr = assemble(tr_dna, tr_prot)
-    Xv = assemble(va_dna, va_prot)
-    Xt = assemble(te_dna, te_prot)
+    Xtr = assemble(tr_dna, tr_go, tr_prot)
+    Xv = assemble(va_dna, va_go, va_prot)
+    Xt = assemble(te_dna, te_go, te_prot)
 
     # tensors
     trX = torch.tensor(Xtr)
@@ -368,10 +406,19 @@ def run_ablation_probes(
     """
     Run a grid of ablation probes. Returns {mode: result_dict}.
     """
-    D_prot = int(seq_ds["train"].D_prot)
-    default_modes = ["dna", "prot", "dna+prot"]
+    D_go = int(getattr(seq_ds["train"], "D_go", 0) or 0)
+    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
+    default_modes: List[str] = ["dna"]
+    if D_go > 0:
+        default_modes.extend(["go", "dna+go", "dna+zero-go"])
+    if D_prot > 0:
+        default_modes.extend(["prot", "dna+prot"])
+    if D_go > 0 and D_prot > 0:
+        default_modes.extend(["go+prot", "dna+go+prot"])
     if modes is None:
-        modes = default_modes
+        # remove potential duplicates while preserving order
+        seen = set()
+        modes = [m for m in default_modes if not (m in seen or seen.add(m))]
 
     results: Dict[str, dict] = {}
     for m in modes:

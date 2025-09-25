@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Dict, Any, Optional, Tuple, List, Sequence
 
+from src.llm.config import PROMPT_TMPL
 from src.llm.eval import evaluate_split_batched
 
 # ----------------------------
@@ -92,6 +93,7 @@ def _prompt_blank_context(ds_split, *, debug: bool = True):
         for c in cols:
             meta[c] = ""
         setattr(ds_split, "_force_blank_prompts", True)
+        setattr(ds_split, "_force_blank_prompt_template", PROMPT_TMPL.format(ctx=""))
         if debug:
             _debug_dump_sources(before, meta[cols], tag="prompt_blank", cols=cols)
         yield
@@ -100,6 +102,8 @@ def _prompt_blank_context(ds_split, *, debug: bool = True):
             meta[c] = ser
         if hasattr(ds_split, "_force_blank_prompts"):
             delattr(ds_split, "_force_blank_prompts")
+        if hasattr(ds_split, "_force_blank_prompt_template"):
+            delattr(ds_split, "_force_blank_prompt_template")
 
 
 @contextmanager
@@ -150,7 +154,9 @@ class _CondTransformCfg:
     noise_alpha: float = 0.0  # if noise_std is None, use alpha*std(v)
     scale: float = 1.0
     perm_index: Optional[np.ndarray] = None  # length = len(split)
-    zero_ranges: Optional[Tuple[Tuple[int, int], ...]] = None  # slices to zero post-transform
+    zero_ranges: Optional[Tuple[Tuple[int, int], ...]] = (
+        None  # slices to zero post-transform
+    )
 
 
 class _TransformedSplit:
@@ -369,6 +375,7 @@ def run_prompt_vs_cond_ablation(
     if train_split is None:
         raise ValueError("Sequence dataset missing 'train' split for ablation")
     D_eff = int(train_split.D_eff)
+    D_go = int(getattr(train_split, "D_go", 0) or 0)
     D_prot = int(train_split.D_prot)
 
     # --- cond only (blank prompts) ---
@@ -412,18 +419,39 @@ def run_prompt_vs_cond_ablation(
         )
         results["cond_zero_dna"] = out
 
+    # --- cond_zero_go (zero only GO features) ---
+    if D_go > 0:
+        go_start, go_end = D_eff, D_eff + D_go
+        print("\n[ABL] cond_zero_go (conditioning: zero GO block)")
+        view_zero_go = _with_cond_zero_ranges(seq_ds, [(go_start, go_end)])
+        out = evaluate_split_batched(
+            view_zero_go,
+            out_dir=out_dir,
+            split=split,
+            max_n=max_n,
+            batch_size=batch_size,
+            sample_rationales=0,
+        )
+        results["cond_zero_go"] = out
+
     # --- cond_zero_prot (zero only protein features) ---
-    print("\n[ABL] cond_zero_prot (conditioning: zero protein block)")
-    view_zero_prot = _with_cond_zero_ranges(seq_ds, [(D_eff, D_eff + D_prot)])
-    out = evaluate_split_batched(
-        view_zero_prot,
-        out_dir=out_dir,
-        split=split,
-        max_n=max_n,
-        batch_size=batch_size,
-        sample_rationales=0,
-    )
-    results["cond_zero_prot"] = out
+    prot_start = D_eff + D_go
+    if D_prot > 0:
+        print("\n[ABL] cond_zero_prot (conditioning: zero protein block)")
+        view_zero_prot = _with_cond_zero_ranges(
+            seq_ds, [(prot_start, prot_start + D_prot)]
+        )
+        out = evaluate_split_batched(
+            view_zero_prot,
+            out_dir=out_dir,
+            split=split,
+            max_n=max_n,
+            batch_size=batch_size,
+            sample_rationales=0,
+        )
+        results["cond_zero_prot"] = out
+    else:
+        print("\n[ABL] cond_zero_prot skipped (no protein block)")
 
     # --- prompt only (conditioning removed) ---
     print("\n[ABL] prompt only (conditioning zeroed)")
@@ -442,7 +470,11 @@ def run_prompt_vs_cond_ablation(
     prompt_field_abls = [
         ("prompt_no_hgvsp", ("hgvsp", "hgvs.p", "hgvs_p"), "remove HGVS.p from prompt"),
         ("prompt_no_hgvsc", ("hgvsc", "hgvs.c", "hgvs_c"), "remove HGVS.c from prompt"),
-        ("prompt_no_gene", ("gene_symbol", "genesymbol"), "remove gene symbol from prompt"),
+        (
+            "prompt_no_gene",
+            ("gene_symbol", "genesymbol"),
+            "remove gene symbol from prompt",
+        ),
     ]
     for name, keys, desc in prompt_field_abls:
         print(f"\n[ABL] {name} ({desc})")
@@ -546,6 +578,7 @@ def run_prompt_vs_cond_ablation(
         "cond_only",
         "cond_zero_dna",
         "cond_zero_prot",
+        "cond_zero_go",
         "prompt_only",
         "prompt_no_hgvsp",
         "prompt_no_hgvsc",

@@ -350,12 +350,16 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     out_dir.mkdir(parents=True, exist_ok=True)
     set_all_seeds(cfg.seed)
 
-    # Compute conditioning dim from dataset (DNA + protein)
+    # Compute conditioning dim from dataset (DNA + GO + protein)
     train_split = seq_ds["train"]
     D_eff = int(train_split.D_eff)
+    D_go = int(getattr(train_split, "D_go", 0) or 0)
     D_prot = int(train_split.D_prot)
-    D_cond = D_eff + D_prot
-    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
+    D_cond = D_eff + D_go + D_prot
+    print(
+        "[INFO] LLM pipeline: "
+        f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
+    )
 
     # build model with matching projector input
     tok, base_model, projector = build_qwen_with_lora(cfg, D_cond)

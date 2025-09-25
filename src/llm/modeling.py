@@ -11,6 +11,24 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from .config import COND_START_TOKEN, COND_END_TOKEN
+
+
+def _ensure_special_tokens(tokenizer: AutoTokenizer) -> int:
+    """Ensure custom delimiter tokens exist on the tokenizer."""
+
+    missing: list[str] = []
+    for token in (COND_START_TOKEN, COND_END_TOKEN):
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id == tokenizer.unk_token_id or token_id is None:
+            missing.append(token)
+
+    if not missing:
+        return 0
+
+    added = tokenizer.add_special_tokens({"additional_special_tokens": missing})
+    return added
+
 
 class ViewTokens(nn.Module):
     def __init__(self, k: int, d_out: int):
@@ -154,6 +172,7 @@ def build_qwen_with_lora(cfg, D_cond: int):
     tok = AutoTokenizer.from_pretrained(
         cfg.model_id, use_fast=True, trust_remote_code=True
     )
+    added_tokens = _ensure_special_tokens(tok)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
@@ -165,6 +184,9 @@ def build_qwen_with_lora(cfg, D_cond: int):
         quantization_config=quant_cfg,
         device_map="auto",
     )
+    if added_tokens:
+        base.resize_token_embeddings(len(tok))
+
     try:
         base.config.pretraining_tp = 1
     except Exception:

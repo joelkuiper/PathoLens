@@ -95,9 +95,13 @@ def evaluate_split_batched(
 
     train_split = seq_ds["train"]
     D_eff = int(train_split.D_eff)
+    D_go = int(getattr(train_split, "D_go", 0) or 0)
     D_prot = int(train_split.D_prot)
-    D_cond = D_eff + D_prot
-    print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
+    D_cond = D_eff + D_go + D_prot
+    print(
+        "[INFO] Eval: "
+        f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
+    )
 
     tok, model = load_finetuned_model(model_id, D_cond, adapter_dir, projector_path)
     enable_fast_generate(model, tok)
@@ -136,11 +140,16 @@ def evaluate_split_batched(
             # normal context build
             ctx = build_ctx_from_row(ds.meta.iloc[i])
 
-            # if flagged by ablation: force ctx blank
             if getattr(ds, "_force_blank_prompts", False):
-                ctx = ""
+                prompt_text = getattr(
+                    ds,
+                    "_force_blank_prompt_template",
+                    PROMPT_TMPL.format(ctx=""),
+                )
+            else:
+                prompt_text = PROMPT_TMPL.format(ctx=ctx)
 
-            prompts.append(PROMPT_TMPL.format(ctx=ctx))
+            prompts.append(prompt_text)
             y_batch.append(int(ds.meta.iloc[i]["_y"]))
 
         conds = np.stack(conds, axis=0)
@@ -228,7 +237,14 @@ def evaluate_split_batched(
             cond_vec = x.numpy()
             row = ds.meta.iloc[i]
             ctx = build_ctx_from_row(row)
-            prompt = PROMPT_TMPL.format(ctx=ctx)
+            if getattr(ds, "_force_blank_prompts", False):
+                prompt = getattr(
+                    ds,
+                    "_force_blank_prompt_template",
+                    PROMPT_TMPL.format(ctx=""),
+                )
+            else:
+                prompt = PROMPT_TMPL.format(ctx=ctx)
 
             pred = predict_label_with_probs(model, tok, prompt, cond_vec)
             label_word = pred["label"]

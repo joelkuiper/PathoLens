@@ -26,9 +26,9 @@ class CondTextDataset(Dataset):
     Builds conditioning vectors from SequenceTowerDataset samples.
 
     Assumes each sample returns:
-        v, *_  where v packs  [ dna_eff | prot_eff ]
+        v, *_  where v packs  [ dna_eff | go_vec | prot_eff ]
 
-    We *explicitly* slice to D_cond = D_eff + D_prot
+    We *explicitly* slice to D_cond = D_eff + D_go + D_prot
     so any future additions to v won't silently leak in.
     """
 
@@ -36,14 +36,14 @@ class CondTextDataset(Dataset):
         t0 = time.time()
         self.seq_ds = seq_ds
         self.meta = seq_ds.meta
-        # include protein block alongside DNA features
+        # include GO and protein blocks alongside DNA features
         D_eff = int(seq_ds.D_eff)
-        D_prot = int(seq_ds.D_prot)
-        self.D_eff, self.D_prot = D_eff, D_prot
-        self.D_go = int(getattr(seq_ds, "D_go", 0) or 0)
-        self.D_cond = D_eff + D_prot
+        D_go = int(getattr(seq_ds, "D_go", 0) or 0)
+        D_prot = int(getattr(seq_ds, "D_prot", 0) or 0)
+        self.D_eff, self.D_go, self.D_prot = D_eff, D_go, D_prot
+        self.D_cond = D_eff + D_go + D_prot
         print(
-            f"[DEBUG] CondTextDataset: D_eff={D_eff} D_prot={D_prot} "
+            f"[DEBUG] CondTextDataset: D_eff={D_eff} D_go={D_go} D_prot={D_prot} "
             f"=> D_cond={self.D_cond} | Build time: {time.time() - t0:.2f}s"
         )
 

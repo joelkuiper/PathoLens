@@ -5,7 +5,7 @@
 ## Task
 Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicity of a variant. Many tools attempt to predict pathogenicity (e.g., CADD), and it is generally considered a hard problem because signal comes from diverse molecular and biological factors.
 
-Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector and protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM2](https://github.com/facebookresearch/esm) embeddings.
+Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector, a node2vec embedding of the gene's [Gene Ontology](https://www.geneontology.org/) neighbourhood, and optional protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM2](https://github.com/facebookresearch/esm) embeddings.
 
 ## Intuition and basic idea
 
@@ -14,7 +14,7 @@ PathoLens separates “feature extraction” from “decision making.” The fea
 Why this could work:
 
 1. **Transformers attend over tokens.** Encoding the biology as a few learned embeddings lets the model attend to it at every layer, without adding a separate classifier head.
-2. **The conditioning is informative.** `alt – ref` captures a local perturbation signal, and protein embeddings inject coarse functional context.
+2. **The conditioning is informative.** `alt – ref` captures a local perturbation signal; the GO vector encodes broad functional context; protein embeddings inject finer structural detail when available.
 3. **Probabilities fall out naturally.** The target is literally a vocabulary word, so we can score `log P("Benign")` vs `log P("Pathogenic")` directly.
 
 This is not a claim that the approach *works*. It’s a test of whether modest, structured biological signal, inserted in a way that matches how transformers operate, can move the needle on a hard classification task.
@@ -31,10 +31,13 @@ The sequence→effect mapping is also mediated by layers the model does not see:
 We restrict to GRCh38 and ClinVar assertions with “criteria provided, multiple submitters, no conflicts.” Variants are split **by gene** into train/validation/test to minimize leakage. Labels are collapsed to a binary scheme; VUS are excluded upstream.
 
 
+### GO embedding (Gene Ontology)
+We derive **gene-level embeddings** from a heterogeneous GO graph constructed from the Gene Annotation File (GAF). Nodes represent genes and GO terms; edges connect each human gene (taxon 9606) to the GO terms it is annotated with, after removing `NOT` qualifiers and optionally restricting to curated evidence codes. To inject hierarchical context, the graph also includes GO **term–term** links limited to `is_a` relations parsed from the GO graph. We drop the three GO root terms and can prune very high-degree term nodes to reduce trivial shortcuts; any isolates created by pruning are removed. A Node2Vec model is then trained on this graph, and only the gene embeddings are retained and L2-normalized. These vectors summarize each gene’s neighbourhood in GO and provide a coarse prior about biological processes, molecular functions, and cellular components tied to the gene.
+
 ### DNA embedding (reference/alternate FASTA windows)
 We derive a **local sequence perturbation vector** from GRCh38 using the ClinVar VCF-style fields. For each variant, it opens the reference FASTA with `pyfaidx` and pulls a symmetric window around the locus (default ±512 bp, configurable). Coordinates are handled in **1-based VCF convention**: given `ChromosomeAccession`, `PositionVCF`, `ReferenceAlleleVCF`, and `AlternateAlleleVCF`, it slices `[pos−window … pos+len(ref)−1+window]` from the chromosome, verifies that the REF allele matches the FASTA at the expected offset, and **skips** any record that fails this check. The **alternate window** is synthesized in-place by replacing the REF span with ALT (so indels are handled naturally). All characters are upper-cased and non-IUPAC bases are sanitized to `N` to avoid tokenizer surprises. These **REF** and **ALT** windows are then embedded with the 1000G nucleotide transformer, and a single vector per window is obtained by masked mean pooling over token embeddings.
 
-The final signal is the **normalized effect vector** `dna_eff = normalize(embed(ALT) − embed(REF))`, which emphasizes local changes while cancelling much of the background sequence. Only this effect array is persisted on disk (FP16 in a compressed NPZ), alongside a Feather file that caches the curated windows and minimal provenance (window size, FASTA path, row alignment). At training time, `dna_eff` is concatenated with any available protein embeddings to form the conditioning input supplied to the LLM as virtual tokens.
+The final signal is the **normalized effect vector** `dna_eff = normalize(embed(ALT) − embed(REF))`, which emphasizes local changes while cancelling much of the background sequence. Only this effect array is persisted on disk (FP16 in a compressed NPZ), alongside a Feather file that caches the curated windows and minimal provenance (window size, FASTA path, row alignment). At training time, `dna_eff` is concatenated with the gene’s GO embedding (and protein features when available) to form the conditioning input supplied to the LLM as virtual tokens.
 
 ### Protein embedding
 For protein-level features, PathoLens integrates ESM-2 embeddings (Meta AI’s protein language model). Using Ensembl VEP with the ProteinSeqs plugin, we extract both the wild-type and mutated protein sequences for each ClinVar variant. These sequences are embedded with ESM-2, and we compute a delta representation after mean pooling that captures the local effect of the mutation on the protein context. This embedding encodes biochemical and structural information (such as residue conservation, substitution severity, and domain context) that goes beyond simple VEP consequence labels. The resulting protein effect vectors are concatenated with DNA effect to form the conditioning input to our projector, which maps them into virtual tokens that the LLM consumes alongside the variant prompt.
@@ -49,7 +52,7 @@ The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight 
 Alongside the tokens, the projector exposes a small **auxiliary classification head**: a single Linear over the flattened projection (`k*d_out → n_classes`). During training we combine the aux-head cross-entropy with the main LM loss (on the label word) using a modest weight. This gives the projector a direct discriminative signal, stabilizes early training, and encourages the projected tokens to be informative. The aux head is **only** a training aid; at inference we ignore it and score purely from the LM by comparing the log-likelihoods of the two label tokens (“Benign” vs “Pathogenic”).
 
 ## Results (Test set)
-We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits. The model consumes only a compact conditioning vector and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
+We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits. The model consumes only a compact conditioning vector (DNA effect ⊕ GO(gene) ⊕ optional protein delta) and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
 
 ### Overall performance
 #### MLP probe (Validation)
@@ -66,7 +69,6 @@ We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitt
 This table show the results of a 2-layer Multi Layer Perceptron (MLP) on the raw concatenated embedding space (without the LLM).
 See [mlp_test.py](./src/mlp_test.py). These results demonstrate that there is learnable signal in the embedding space, and that the concatenated vector outperforms each embedding space individually.
 
-An earlier version ([3b65d2a](https://github.com/joelkuiper/PathoLens/commit/3b65d2a9859d138cf86adb37cfa9cc711cc6e093)) also used a node2vec embedding derived from the Gene Ontology (GO) and a Gene Annotation File (GAF), however it was decided to drop this feature due to poor performance.
 
 #### LLM Full dataset
 
@@ -148,6 +150,8 @@ These missense-only ablations show a clear lift from conditioning beyond the (re
 
 - [ClinVar variant summary](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz)
 - [GRCh38 fna](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz)
+- [Gene Association File (GAF)](https://current.geneontology.org/annotations/goa_human.gaf.gz)
+- [Gene Ontology JSON graph](https://purl.obolibrary.org/obo/go.json)
 
 To download them you can use:
 
@@ -189,6 +193,24 @@ Relative paths are resolved relative to the config file, and `~` is expanded eve
 > omitted.
 
 ### Training & Evaluation
+
+Generate the GO node2vec embeddings once (adjust hyperparameters as needed):
+
+``` bash
+python -m src.go.go_node2vec \
+  --go-json data/raw/go.json \
+  --gaf data/raw/goa_human.gaf.gz \
+  --out-prefix data/processed/go_n2v \
+  --dim 256 \
+  --epochs 20 \
+  --walk-len 40 \
+  --walks-per-node 5 \
+  --ctx-size 5 \
+  --neg-samples 2 \
+  --batch-size 256 \
+  --drop-roots \
+  --prune-term-degree 200
+```
 
 Then build the caches and (optionally) run the LLM fine-tune using the unified pipeline
 config:

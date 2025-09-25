@@ -8,7 +8,7 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from .modeling import CondProjector
+from .modeling import CondProjector, _ensure_special_tokens
 
 
 def _select_compute_dtype():
@@ -37,10 +37,14 @@ def load_finetuned_model(
         raise FileNotFoundError(f"[LOAD] Adapter directory not found: {adapter_dir}")
     projector_dir = Path(projector_path)
     if not projector_dir.is_dir():
-        raise FileNotFoundError(f"[LOAD] Projector directory not found: {projector_dir}")
+        raise FileNotFoundError(
+            f"[LOAD] Projector directory not found: {projector_dir}"
+        )
 
     # ----- Tokenizer -----
     tok = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True)
+    added_tokens = _ensure_special_tokens(tok)
+
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
@@ -58,6 +62,9 @@ def load_finetuned_model(
         quantization_config=quant,
         device_map="auto",
     )
+
+    if added_tokens:
+        base.resize_token_embeddings(len(tok))
 
     # ----- LoRA adapter -----
     print("[LOAD] Loading adapter via PeftModel.from_pretrained:", adapter_dir)
@@ -80,7 +87,7 @@ def load_finetuned_model(
             "[LOAD] D_cond mismatch:\n"
             f"        Provided D_cond={D_cond}\n"
             f"        Saved projector expects D_cond={projector.d_in}\n"
-            "        Pass the correct D_cond (e.g., D_eff + D_prot)."
+            "        Pass the correct D_cond (e.g., D_eff + D_go + D_prot)."
         )
 
     emb = model.get_input_embeddings().weight

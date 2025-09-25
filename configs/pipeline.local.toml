@@ -8,6 +8,8 @@
 clinvar = "../data/raw/variant_summary.txt.gz"
 # Reference FASTA (GRCh38)
 fasta = "../data/raw/GCF_000001405.40_GRCh38.p14_genomic.fna"
+# Gene Ontology gene embedding archive (npz)
+go = "../data/processed/go_n2v_genes.npz"
 # Where all derived artifacts will be written
 artifacts = "../artifacts"
 
@@ -36,6 +38,11 @@ jobs = 18
 vep_fork = 0
 force_embeddings = false
 force_vep = false
+
+[GO]
+npz = "../data/processed/go_n2v_genes.npz"
+normalize = true
+uppercase_keys = true
 
 [LLM]
 enabled = true

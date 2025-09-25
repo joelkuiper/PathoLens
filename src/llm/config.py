@@ -21,6 +21,9 @@ Pathogenic
 
 BIN_LABELS = ["Benign", "Pathogenic"]
 
+COND_START_TOKEN = "<|cond|>"
+COND_END_TOKEN = "<|endcond|>"
+
 PROMPT_TMPL = "Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
 
 
@@ -35,6 +38,8 @@ def set_all_seeds(seed: int = 42):
 __all__ = [
     "CHAT_SYSTEM",
     "BIN_LABELS",
+    "COND_START_TOKEN",
+    "COND_END_TOKEN",
     "PROMPT_TMPL",
     "LLMRunConfig",
     "set_all_seeds",
