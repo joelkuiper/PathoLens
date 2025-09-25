@@ -4,6 +4,7 @@ import argparse
 import re
 from pathlib import Path
 from typing import Dict, Sequence, Tuple
+from pprint import pprint
 
 import pandas as pd
 
@@ -311,22 +312,27 @@ def main() -> None:
     run_llm_pipeline(llm_cfg, seq_datasets)
     print("[done] training complete")
 
-    # print("[llm] running evaluation")
-    # llm_eval.run_all(seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id)
+    print("[llm] running evaluation")
+    eval_result = llm_eval.run_all(
+        seq_datasets, out_dir=str(out_dir), model_id=llm_cfg.model_id
+    )
+    pprint(eval_result)
 
     print("[llm] running ablation test")
     import src.llm.ablation as ablation
 
-    ablation.run_prompt_vs_cond_ablation(
+    ablation_result = ablation.run_prompt_vs_cond_ablation(
         seq_datasets,
         out_dir="artifacts/qwen3/",
         split="test",
         batch_size=128,
-        # max_n = 5_000,
+        max_n=5_000,
         scale_sweep=(),
         do_permute=False,
         do_pure_noise=False,
     )
+
+    pprint(ablation_result)
 
 
 if __name__ == "__main__":
