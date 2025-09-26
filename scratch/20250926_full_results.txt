@@ -1,0 +1,464 @@
+VAL metrics:
+{'n': 31384, 'accuracy': 0.9559648228396636, 'precision': 0.9079681274900399, 'recall': 0.9084507042253521, 'f1': 0.9082093517534537, 'auc_roc': 0.9892479257700362, 'auc_pr': 0.9733990255098915}
+Confusion: [[23165, 693], [689, 6837]]
+Saved VAL predictions to: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/val_scored.feather
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.63s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 508/508 [35:02<00:00,  4.14s/batch]
+
+TEST metrics:
+{'n': 32468, 'accuracy': 0.948379943328816, 'precision': 0.9026535698577921, 'recall': 0.8588366578323336, 'f1': 0.8802001429592566, 'auc_roc': 0.982854346435656, 'auc_pr': 0.9532421923972777}
+Confusion: [[24635, 664], [1012, 6157]]
+Saved TEST predictions to: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather
+{'test': {'accuracy': 0.948379943328816,
+          'auc_pr': 0.9532421923972777,
+          'auc_roc': 0.982854346435656,
+          'confusion_matrix': [[24635, 664], [1012, 6157]],
+          'f1': 0.8802001429592566,
+          'n': 32468,
+          'precision': 0.9026535698577921,
+          'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+          'rationales': [{'idx': 8759,
+                          'pred_label': 'Benign',
+                          'rationale': 'Because it does not alter any amino '
+                                       'acid sequence, Benignant.'},
+                         {'idx': 16595,
+                          'pred_label': 'Benign',
+                          'rationale': 'Because the variant is a synonymous '
+                                       'variant, Benignant.'},
+                         {'idx': 27615,
+                          'pred_label': 'Benign',
+                          'rationale': 'Because Likely harmless, '
+                                       'Pathogenogenic (Benignant) likely '
+                                       'disease-causing'},
+                         {'idx': 20679,
+                          'pred_label': 'Benign',
+                          'rationale': 'Because Likely harmless '
+                                       'Pathogensogenic Likely harmless '
+                                       'Benignant'}],
+          'recall': 0.8588366578323336,
+          'report': '              precision    recall  f1-score   support\n'
+                    '\n'
+                    '      Benign      0.961     0.974     0.967     25299\n'
+                    '  Pathogenic      0.903     0.859     0.880      7169\n'
+                    '\n'
+                    '    accuracy                          0.948     32468\n'
+                    '   macro avg      0.932     0.916     0.924     32468\n'
+                    'weighted avg      0.948     0.948     0.948     32468\n',
+          'split': 'test'},
+ 'val': {'accuracy': 0.9559648228396636,
+         'auc_pr': 0.9733990255098915,
+         'auc_roc': 0.9892479257700362,
+         'confusion_matrix': [[23165, 693], [689, 6837]],
+         'f1': 0.9082093517534537,
+         'n': 31384,
+         'precision': 0.9079681274900399,
+         'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/val_scored.feather',
+         'rationales': [{'idx': 8466,
+                         'pred_label': 'Benign',
+                         'rationale': 'Because pathogenicityBenignant ✅Likely '
+                                      'harmless✅Benignant'},
+                        {'idx': 16040,
+                         'pred_label': 'Benign',
+                         'rationale': 'Because Likely harmless Benignant due '
+                                      'pathogenicity of Benignant'},
+                        {'idx': 26693,
+                         'pred_label': 'Benign',
+                         'rationale': 'Because Benignign—Benigign '
+                                      'variantPathogenogenicign'},
+                        {'idx': 19989,
+                         'pred_label': 'Benign',
+                         'rationale': 'Because Likely harmless, Pathignogenic '
+                                      'Benignant Benignant'}],
+         'recall': 0.9084507042253521,
+         'report': '              precision    recall  f1-score   support\n'
+                   '\n'
+                   '      Benign      0.971     0.971     0.971     23858\n'
+                   '  Pathogenic      0.908     0.908     0.908      7526\n'
+                   '\n'
+                   '    accuracy                          0.956     31384\n'
+                   '   macro avg      0.940     0.940     0.940     31384\n'
+                   'weighted avg      0.956     0.956     0.956     31384\n',
+         'split': 'val'}}
+[llm] running ablation test
+
+[ABL] cond only (prompts blanked)
+[debug:prompt_blank] REAL HGVS.p: 22119 -> 0 | REAL HGVS.c: 32268 -> 0
+[debug:prompt_blank] i=0 sha(before)=14ee8ad39b sha(after)=1a50663826
+  BEFORE: FOXRED1 | FOXRED1 | NM_017547.4 | ENST00000263578 | ENSP00000263578 | c.694C>T | p.Gln232Ter | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T …
+  AFTER :  |  |  |  |  |  |  |  |  |  |  |  |  | 
+[debug:prompt_blank] i=1 sha(before)=8ce9292e86 sha(after)=1a50663826
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.599T>C | p.Leu200Pro | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.59…
+  AFTER :  |  |  |  |  |  |  |  |  |  |  |  |  | 
+[debug:prompt_blank] i=2 sha(before)=a581ee5fd0 sha(after)=1a50663826
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.796G>T | p.Gly266Ter | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266…
+  AFTER :  |  |  |  |  |  |  |  |  |  |  |  |  | 
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.66s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [03:24<00:00,  5.12s/batch]
+
+[ABL] cond+prompt (baseline)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.63s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:26<00:00,  8.17s/batch]
+
+[ABL] cond_zero_dna (conditioning: zero DNA block)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:05<00:00,  1.68s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:26<00:00,  8.16s/batch]
+
+[ABL] cond_zero_go (conditioning: zero GO block)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:05<00:00,  1.67s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:26<00:00,  8.16s/batch]
+
+[ABL] cond_zero_prot (conditioning: zero protein block)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:05<00:00,  1.68s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:26<00:00,  8.16s/batch]
+
+[ABL] prompt only (conditioning zeroed)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.66s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:26<00:00,  8.16s/batch]
+
+[ABL] prompt_no_hgvsp (remove HGVS.p from prompt)
+[debug:prompt_no_hgvsp] REAL HGVS.p: 22119 -> 22066 | REAL HGVS.c: 32268 -> 32268
+[debug:prompt_no_hgvsp] i=0 sha(before)=14ee8ad39b sha(after)=52f1f70820
+  BEFORE: FOXRED1 | FOXRED1 | NM_017547.4 | ENST00000263578 | ENSP00000263578 | c.694C>T | p.Gln232Ter | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T …
+  AFTER : FOXRED1 | FOXRED1 | NM_017547.4 | ENST00000263578 | ENSP00000263578 | c.694C>T |  | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T (p.Gln232Te…
+[debug:prompt_no_hgvsp] i=1 sha(before)=8ce9292e86 sha(after)=a26dd3bdf9
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.599T>C | p.Leu200Pro | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.59…
+  AFTER : LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.599T>C |  | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.599T>C (p.Leu…
+[debug:prompt_no_hgvsp] i=2 sha(before)=a581ee5fd0 sha(after)=65753d456c
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.796G>T | p.Gly266Ter | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266…
+  AFTER : LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.796G>T |  | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266Ter)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.66s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:21<00:00,  8.03s/batch]
+
+[ABL] prompt_no_hgvsc (remove HGVS.c from prompt)
+[debug:prompt_no_hgvsc] REAL HGVS.p: 22119 -> 22119 | REAL HGVS.c: 32268 -> 32221
+[debug:prompt_no_hgvsc] i=0 sha(before)=14ee8ad39b sha(after)=0f1142ffdf
+  BEFORE: FOXRED1 | FOXRED1 | NM_017547.4 | ENST00000263578 | ENSP00000263578 | c.694C>T | p.Gln232Ter | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T …
+  AFTER : FOXRED1 | FOXRED1 | NM_017547.4 | ENST00000263578 | ENSP00000263578 |  | p.Gln232Ter | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T (p.Gln23…
+[debug:prompt_no_hgvsc] i=1 sha(before)=8ce9292e86 sha(after)=9d887badab
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.599T>C | p.Leu200Pro | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.59…
+  AFTER : LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 |  | p.Leu200Pro | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.599T>C (p.…
+[debug:prompt_no_hgvsc] i=2 sha(before)=a581ee5fd0 sha(after)=87cb495644
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.796G>T | p.Gly266Ter | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266…
+  AFTER : LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 |  | p.Gly266Ter | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266Ter)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.67s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [04:54<00:00,  7.36s/batch]
+
+[ABL] prompt_no_gene (remove gene symbol from prompt)
+[debug:prompt_no_gene] REAL HGVS.p: 22119 -> 22119 | REAL HGVS.c: 32268 -> 32268
+[debug:prompt_no_gene] i=0 sha(before)=14ee8ad39b sha(after)=31af5afe37
+  BEFORE: FOXRED1 | FOXRED1 | NM_017547.4 | ENST00000263578 | ENSP00000263578 | c.694C>T | p.Gln232Ter | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T …
+  AFTER :  |  | NM_017547.4 | ENST00000263578 | ENSP00000263578 | c.694C>T | p.Gln232Ter | stop_gained | HIGH | stop_gained | T | Q/* | Cag/Tag | NM_017547.4(FOXRED1):c.694C>T (p.Gln232Ter)
+[debug:prompt_no_gene] i=1 sha(before)=8ce9292e86 sha(after)=0d2b9aca03
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.599T>C | p.Leu200Pro | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.59…
+  AFTER :  |  | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.599T>C | p.Leu200Pro | missense_variant | MODERATE | missense_variant | G | L/P | cTg/cCg | NM_000235.4(LIPA):c.599T>C (p.…
+[debug:prompt_no_gene] i=2 sha(before)=a581ee5fd0 sha(after)=faafd2afe1
+  BEFORE: LIPA | LIPA | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.796G>T | p.Gly266Ter | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266…
+  AFTER :  |  | NM_000235.4 | ENST00000336233 | ENSP00000337354 | c.796G>T | p.Gly266Ter | stop_gained | HIGH | stop_gained | A | G/* | Gga/Tga | NM_000235.4(LIPA):c.796G>T (p.Gly266Ter)
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.63s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:12<00:00,  7.81s/batch]
+
+[ABL] cond+noise (conditioning + Gaussian noise)
+[debug:cond_noise] noise_std=1.5 noise_alpha=0.0
+[debug:cond_noise] i=0 ||v||_2(before)=1.7321 ||v||_2(after)=66.5978  std(v)=0.03858 std(noise)=1.48125  SNR≈0.026
+[debug:cond_noise] i=1 ||v||_2(before)=1.7322 ||v||_2(after)=67.8382  std(v)=0.03858 std(noise)=1.50967  SNR≈0.026
+[debug:cond_noise] i=2 ||v||_2(before)=1.7321 ||v||_2(after)=67.4571  std(v)=0.03857 std(noise)=1.50007  SNR≈0.026
+[INFO] Eval: D_cond=2016 (eff=1280 go=256 prot=480)
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:04<00:00,  1.63s/it]
+[LOAD] Loading adapter via PeftModel.from_pretrained: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/adapter
+[LOAD] Projector loaded. hidden=2560 k=8 D_cond=2016 dtype=torch.float16 device=cuda:0
+Scoring [test]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40/40 [05:26<00:00,  8.16s/batch]
+
+Ablation summary [test]
+Mode                N      Acc       F1    ROC-AUC     PR-AUC
+------------------------------------------------------
+cond+prompt      5000   0.8886   0.8360     0.9568     0.9337
+cond_only        5000   0.7684   0.6114     0.8141     0.7335
+cond_zero_dna    5000   0.8822   0.8247     0.9575     0.9342
+cond_zero_prot   5000   0.8666   0.7897     0.9448     0.9169
+cond_zero_go     5000   0.8866   0.8302     0.9559     0.9325
+prompt_only      5000   0.8476   0.7434     0.9429     0.9140
+prompt_no_hgvsp   5000   0.8810   0.8240     0.9511     0.9250
+prompt_no_hgvsc   5000   0.8844   0.8302     0.9555     0.9323
+prompt_no_gene   5000   0.8848   0.8462     0.9586     0.9316
+cond+noise       5000   0.8626   0.7876     0.9421     0.9128
+
+Δ vs cond+prompt:
+- cond_only     ΔAcc=-0.1202  ΔF1=-0.2246  ΔROC-AUC=-0.1427  ΔPR-AUC=-0.2002
+- cond_zero_dna  ΔAcc=-0.0064  ΔF1=-0.0114  ΔROC-AUC=+0.0007  ΔPR-AUC=+0.0005
+- cond_zero_prot  ΔAcc=-0.0220  ΔF1=-0.0464  ΔROC-AUC=-0.0120  ΔPR-AUC=-0.0169
+- cond_zero_go  ΔAcc=-0.0020  ΔF1=-0.0058  ΔROC-AUC=-0.0009  ΔPR-AUC=-0.0012
+- prompt_only   ΔAcc=-0.0410  ΔF1=-0.0926  ΔROC-AUC=-0.0139  ΔPR-AUC=-0.0197
+- prompt_no_hgvsp  ΔAcc=-0.0076  ΔF1=-0.0120  ΔROC-AUC=-0.0057  ΔPR-AUC=-0.0087
+- prompt_no_hgvsc  ΔAcc=-0.0042  ΔF1=-0.0058  ΔROC-AUC=-0.0013  ΔPR-AUC=-0.0015
+- prompt_no_gene  ΔAcc=-0.0038  ΔF1=+0.0102  ΔROC-AUC=+0.0018  ΔPR-AUC=-0.0021
+- cond+noise    ΔAcc=-0.0260  ΔF1=-0.0484  ΔROC-AUC=-0.0147  ΔPR-AUC=-0.0209
+{'cond+noise': {'accuracy': 0.8626,
+                'auc_pr': 0.912817279452238,
+                'auc_roc': 0.9420544515719822,
+                'confusion_matrix': [[3039, 149], [538, 1274]],
+                'f1': 0.7876352395672334,
+                'n': 5000,
+                'precision': 0.8952916373858046,
+                'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                'recall': 0.7030905077262694,
+                'report': '              precision    recall  f1-score   '
+                          'support\n'
+                          '\n'
+                          '      Benign      0.850     0.953     0.898      '
+                          '3188\n'
+                          '  Pathogenic      0.895     0.703     0.788      '
+                          '1812\n'
+                          '\n'
+                          '    accuracy                          0.863      '
+                          '5000\n'
+                          '   macro avg      0.872     0.828     0.843      '
+                          '5000\n'
+                          'weighted avg      0.866     0.863     0.858      '
+                          '5000\n',
+                'split': 'test'},
+ 'cond+prompt': {'accuracy': 0.8886,
+                 'auc_pr': 0.9337081411310943,
+                 'auc_roc': 0.9567963714647366,
+                 'confusion_matrix': [[3023, 165], [392, 1420]],
+                 'f1': 0.8360317927583162,
+                 'n': 5000,
+                 'precision': 0.8958990536277602,
+                 'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                 'recall': 0.7836644591611479,
+                 'report': '              precision    recall  f1-score   '
+                           'support\n'
+                           '\n'
+                           '      Benign      0.885     0.948     0.916      '
+                           '3188\n'
+                           '  Pathogenic      0.896     0.784     0.836      '
+                           '1812\n'
+                           '\n'
+                           '    accuracy                          0.889      '
+                           '5000\n'
+                           '   macro avg      0.891     0.866     0.876      '
+                           '5000\n'
+                           'weighted avg      0.889     0.889     0.887      '
+                           '5000\n',
+                 'split': 'test'},
+ 'cond_only': {'accuracy': 0.7684,
+               'auc_pr': 0.733491041936176,
+               'auc_roc': 0.8141171120454463,
+               'confusion_matrix': [[2931, 257], [901, 911]],
+               'f1': 0.6114093959731544,
+               'n': 5000,
+               'precision': 0.7799657534246576,
+               'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+               'recall': 0.5027593818984547,
+               'report': '              precision    recall  f1-score   '
+                         'support\n'
+                         '\n'
+                         '      Benign      0.765     0.919     0.835      '
+                         '3188\n'
+                         '  Pathogenic      0.780     0.503     0.611      '
+                         '1812\n'
+                         '\n'
+                         '    accuracy                          0.768      '
+                         '5000\n'
+                         '   macro avg      0.772     0.711     0.723      '
+                         '5000\n'
+                         'weighted avg      0.770     0.768     0.754      '
+                         '5000\n',
+               'split': 'test'},
+ 'cond_zero_dna': {'accuracy': 0.8822,
+                   'auc_pr': 0.9341749897405461,
+                   'auc_roc': 0.9574872556025493,
+                   'confusion_matrix': [[3026, 162], [427, 1385]],
+                   'f1': 0.8246501935099733,
+                   'n': 5000,
+                   'precision': 0.8952811893988365,
+                   'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                   'recall': 0.7643487858719646,
+                   'report': '              precision    recall  f1-score   '
+                             'support\n'
+                             '\n'
+                             '      Benign      0.876     0.949     0.911      '
+                             '3188\n'
+                             '  Pathogenic      0.895     0.764     0.825      '
+                             '1812\n'
+                             '\n'
+                             '    accuracy                          0.882      '
+                             '5000\n'
+                             '   macro avg      0.886     0.857     0.868      '
+                             '5000\n'
+                             'weighted avg      0.883     0.882     0.880      '
+                             '5000\n',
+                   'split': 'test'},
+ 'cond_zero_go': {'accuracy': 0.8866,
+                  'auc_pr': 0.9325145096254958,
+                  'auc_roc': 0.9559112573087266,
+                  'confusion_matrix': [[3047, 141], [426, 1386]],
+                  'f1': 0.8301886792452831,
+                  'n': 5000,
+                  'precision': 0.9076620825147348,
+                  'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                  'recall': 0.7649006622516556,
+                  'report': '              precision    recall  f1-score   '
+                            'support\n'
+                            '\n'
+                            '      Benign      0.877     0.956     0.915      '
+                            '3188\n'
+                            '  Pathogenic      0.908     0.765     0.830      '
+                            '1812\n'
+                            '\n'
+                            '    accuracy                          0.887      '
+                            '5000\n'
+                            '   macro avg      0.893     0.860     0.873      '
+                            '5000\n'
+                            'weighted avg      0.888     0.887     0.884      '
+                            '5000\n',
+                  'split': 'test'},
+ 'cond_zero_prot': {'accuracy': 0.8666,
+                    'auc_pr': 0.9168563418497052,
+                    'auc_roc': 0.9447555817760309,
+                    'confusion_matrix': [[3081, 107], [560, 1252]],
+                    'f1': 0.7896562598549354,
+                    'n': 5000,
+                    'precision': 0.9212656364974245,
+                    'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                    'recall': 0.6909492273730684,
+                    'report': '              precision    recall  f1-score   '
+                              'support\n'
+                              '\n'
+                              '      Benign      0.846     0.966     '
+                              '0.902      3188\n'
+                              '  Pathogenic      0.921     0.691     '
+                              '0.790      1812\n'
+                              '\n'
+                              '    accuracy                          '
+                              '0.867      5000\n'
+                              '   macro avg      0.884     0.829     '
+                              '0.846      5000\n'
+                              'weighted avg      0.873     0.867     '
+                              '0.861      5000\n',
+                    'split': 'test'},
+ 'prompt_no_gene': {'accuracy': 0.8848,
+                    'auc_pr': 0.9315597737034247,
+                    'auc_roc': 0.958566945997823,
+                    'confusion_matrix': [[2839, 349], [227, 1585]],
+                    'f1': 0.8462359850507207,
+                    'n': 5000,
+                    'precision': 0.8195449844881075,
+                    'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                    'recall': 0.8747240618101545,
+                    'report': '              precision    recall  f1-score   '
+                              'support\n'
+                              '\n'
+                              '      Benign      0.926     0.891     '
+                              '0.908      3188\n'
+                              '  Pathogenic      0.820     0.875     '
+                              '0.846      1812\n'
+                              '\n'
+                              '    accuracy                          '
+                              '0.885      5000\n'
+                              '   macro avg      0.873     0.883     '
+                              '0.877      5000\n'
+                              'weighted avg      0.887     0.885     '
+                              '0.886      5000\n',
+                    'split': 'test'},
+ 'prompt_no_hgvsc': {'accuracy': 0.8844,
+                     'auc_pr': 0.9322515210923726,
+                     'auc_roc': 0.955462727917328,
+                     'confusion_matrix': [[3009, 179], [399, 1413]],
+                     'f1': 0.8301997649823737,
+                     'n': 5000,
+                     'precision': 0.8875628140703518,
+                     'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                     'recall': 0.7798013245033113,
+                     'report': '              precision    recall  f1-score   '
+                               'support\n'
+                               '\n'
+                               '      Benign      0.883     0.944     '
+                               '0.912      3188\n'
+                               '  Pathogenic      0.888     0.780     '
+                               '0.830      1812\n'
+                               '\n'
+                               '    accuracy                          '
+                               '0.884      5000\n'
+                               '   macro avg      0.885     0.862     '
+                               '0.871      5000\n'
+                               'weighted avg      0.885     0.884     '
+                               '0.883      5000\n',
+                     'split': 'test'},
+ 'prompt_no_hgvsp': {'accuracy': 0.881,
+                     'auc_pr': 0.9250047362024433,
+                     'auc_roc': 0.9510920331762874,
+                     'confusion_matrix': [[3012, 176], [419, 1393]],
+                     'f1': 0.8240165631469979,
+                     'n': 5000,
+                     'precision': 0.8878266411727215,
+                     'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                     'recall': 0.7687637969094923,
+                     'report': '              precision    recall  f1-score   '
+                               'support\n'
+                               '\n'
+                               '      Benign      0.878     0.945     '
+                               '0.910      3188\n'
+                               '  Pathogenic      0.888     0.769     '
+                               '0.824      1812\n'
+                               '\n'
+                               '    accuracy                          '
+                               '0.881      5000\n'
+                               '   macro avg      0.883     0.857     '
+                               '0.867      5000\n'
+                               'weighted avg      0.881     0.881     '
+                               '0.879      5000\n',
+                     'split': 'test'},
+ 'prompt_only': {'accuracy': 0.8476,
+                 'auc_pr': 0.9140423939478195,
+                 'auc_roc': 0.942857684445811,
+                 'confusion_matrix': [[3134, 54], [708, 1104]],
+                 'f1': 0.7434343434343434,
+                 'n': 5000,
+                 'precision': 0.9533678756476683,
+                 'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+                 'recall': 0.609271523178808,
+                 'report': '              precision    recall  f1-score   '
+                           'support\n'
+                           '\n'
+                           '      Benign      0.816     0.983     0.892      '
+                           '3188\n'
+                           '  Pathogenic      0.953     0.609     0.743      '
+                           '1812\n'
+                           '\n'
+                           '    accuracy                          0.848      '
+                           '5000\n'
+                           '   macro avg      0.885     0.796     0.818      '
+                           '5000\n'
+                           'weighted avg      0.866     0.848     0.838      '
+                           '5000\n',
+                 'split': 'test'}}
