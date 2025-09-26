@@ -5,7 +5,7 @@
 ## Task
 Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicity of a variant. Many tools attempt to predict pathogenicity (e.g., CADD), and it is generally considered a hard problem because signal comes from diverse molecular and biological factors.
 
-Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector, a node2vec embedding of the gene's [Gene Ontology](https://www.geneontology.org/) neighbourhood, and optional protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM2](https://github.com/facebookresearch/esm) embeddings.
+Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector, a node2vec embedding of the gene's [Gene Ontology](https://www.geneontology.org/) neighbourhood, and protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM2](https://github.com/facebookresearch/esm) embeddings.
 
 ## Intuition and basic idea
 
@@ -52,7 +52,7 @@ The base model is **Qwen3-4B-Instruct-2507** loaded in 4-bit NF4. A lightweight 
 Alongside the tokens, the projector exposes a small **auxiliary classification head**: a single Linear over the flattened projection (`k*d_out → n_classes`). During training we combine the aux-head cross-entropy with the main LM loss (on the label word) using a modest weight. This gives the projector a direct discriminative signal, stabilizes early training, and encourages the projected tokens to be informative. The aux head is **only** a training aid; at inference we ignore it and score purely from the LM by comparing the log-likelihoods of the two label tokens (“Benign” vs “Pathogenic”).
 
 ## Results (Test set)
-We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits. The model consumes only a compact conditioning vector (DNA effect ⊕ GO(gene) ⊕ optional protein delta) and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
+We evaluate PathoLens on ClinVar (GRCh38; “criteria provided, multiple submitters, no conflicts”), using gene-disjoint train/val/test splits. The model consumes only a compact conditioning vector (DNA effect ⊕ GO(gene) ⊕ protein delta) and a short textual scaffold (HGVS, gene symbol, coarse consequence heuristics). Ground-truth labels are never inserted into prompts or scoring; we compute label log-likelihoods via teacher forcing on the two vocabulary targets (“Benign”, “Pathogenic”) and derive probabilities by softmaxing those two log-scores.
 
 ### Overall performance
 #### MLP probe (Validation)
