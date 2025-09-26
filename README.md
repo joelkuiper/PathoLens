@@ -131,9 +131,8 @@ Focusing on `most_severe_consequence = missense_variant` from VEP we obtain the 
 * **Ambiguous functional effect**  unlike loss-of-function (nonsense, frameshift, canonical splice) variants, which often have predictable outcomes, missense changes can be benign or highly pathogenic depending on subtle context (conservation, domain, structure, biochemical compatibility).
 * **Limited prompt signal** the HGVS protein notation (e.g. `p.Gly12Asp`) alone does not convey whether the substitution is harmful. Models trained only on text struggle here, tending towards random or majority-class behavior.
 
-By concentrating evaluation on missense variants, we test whether the conditioning path (DNA + protein effect vectors projected into virtual tokens) actually provides *non-trivial discriminative signal*. A lift on this subset is strong evidence that the model is not just memorizing textual heuristics but genuinely leveraging the embeddings.
+By concentrating evaluation on missense variants, we test whether the conditioning path (DNA + GO + protein effect vectors projected into virtual tokens) actually provides *non-trivial discriminative signal*. A lift on this subset is strong evidence that the model is not just memorizing textual heuristics but genuinely leveraging the embeddings.
 
-Here’s the corrected **Missense-only** block for your README:
 
 **Classification report (Test)**
 
@@ -166,7 +165,7 @@ Here’s the corrected **Missense-only** block for your README:
 | prompt_no_hgvsc | 0.8609 | 0.8162 |  0.9244 | 0.8995 |
 | prompt_no_gene  | 0.7530 | 0.6564 |  0.8068 | 0.7592 |
 | cond+noise      | 0.7876 | 0.7269 |  0.8554 | 0.8024 |
-```
+
 On the missense-only set the model reaches ~86.6% accuracy and F1 ≈ 0.83, showing that conditioning provides clear discriminative signal beyond the prompt strings alone. The ablations confirm that protein embeddings carry the strongest marginal contribution, while GO adds smaller but consistent value; prompt-only performance remains decent, but conditioning lifts both calibration and recall, indicating the model genuinely leverages the embedding features for these harder cases. Interestingly, removing the gene symbol from the prompt (prompt_no_gene) causes one of the largest drops (F1 −0.17), highlighting that the model relies heavily on gene context when reasoning about missense pathogenicity.
 
 
