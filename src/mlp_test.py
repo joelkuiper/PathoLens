@@ -1,4 +1,4 @@
-# src/ablation_probe.py
+# src/mlp_test.py
 # -*- coding: utf-8 -*-
 """
 Ablation MLP probe for PathoLens
@@ -12,7 +12,6 @@ Trains a small MLP on features from SequenceTowerDataset and evaluates:
   - go+prot
   - dna+prot
   - dna+go+prot
-  - dna+zero-go (GO block zeroed to test ablation)
 
 Assumes SequenceTowerDataset packs features in this order per sample:
   [ dna_eff | go_vec | prot_eff ]
@@ -92,7 +91,7 @@ def _threshold_metrics(y_true, p_prob, thr: float) -> Dict[str, float]:
 
 def _find_best_threshold(y_val, p_val, *, grid=201, criterion="f1"):
     """Pick threshold maximizing a metric on val (default: F1)."""
-    ts = np.linspace(0.01, 0.99, grid)
+    ts = np.linspace(0.0, 1.0, grid)  # include 0 and 1
     best_t, best_v = 0.5, -1.0
     for t in ts:
         if criterion == "f1":
@@ -193,29 +192,16 @@ def _run_single_probe(
     va_dna, va_go, va_prot = _slice_blocks(Xv_all, D_eff, D_go, D_prot)
     te_dna, te_go, te_prot = _slice_blocks(Xt_all, D_eff, D_go, D_prot)
 
-    use_dna = feat_mode in (
-        "dna",
-        "dna+go",
-        "dna+prot",
-        "dna+go+prot",
-        "dna+zero-go",
-    )
-    use_go = feat_mode in (
-        "go",
-        "dna+go",
-        "go+prot",
-        "dna+go+prot",
-        "dna+zero-go",
-    )
-    zero_go = "zero-go" in feat_mode
-    if zero_go:
-        use_go = True
+    use_dna = feat_mode in ("dna", "dna+go", "dna+prot", "dna+go+prot")
+    use_go = feat_mode in ("go", "dna+go", "go+prot", "dna+go+prot")
     use_prot = feat_mode in ("prot", "dna+prot", "go+prot", "dna+go+prot")
 
     if use_go and D_go <= 0:
         raise ValueError("GO features requested but dataset lacks GO embeddings")
     if use_prot and D_prot <= 0:
-        raise ValueError("Protein features requested but dataset lacks protein embeddings")
+        raise ValueError(
+            "Protein features requested but dataset lacks protein embeddings"
+        )
 
     # z-score each active block separately (fit on train)
     def zfit(X):
@@ -234,10 +220,6 @@ def _run_single_probe(
         tr_go, sc_go = zfit(tr_go)
         va_go = zapply(va_go, sc_go)
         te_go = zapply(te_go, sc_go)
-        if zero_go:
-            tr_go = np.zeros_like(tr_go)
-            va_go = np.zeros_like(va_go)
-            te_go = np.zeros_like(te_go)
     if use_prot:
         tr_prot, sc_pr = zfit(tr_prot)
         va_prot = zapply(va_prot, sc_pr)
@@ -400,7 +382,7 @@ def run_ablation_probes(
     patience=4,
     device: Optional[str] = None,
     seed: int = 0,
-    tune_threshold_on="f1",
+    tune_threshold_on="youden",
     opt_metric="pr",
 ) -> Dict[str, dict]:
     """
@@ -410,7 +392,7 @@ def run_ablation_probes(
     D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
     default_modes: List[str] = ["dna"]
     if D_go > 0:
-        default_modes.extend(["go", "dna+go", "dna+zero-go"])
+        default_modes.extend(["go", "dna+go"])
     if D_prot > 0:
         default_modes.extend(["prot", "dna+prot"])
     if D_go > 0 and D_prot > 0:

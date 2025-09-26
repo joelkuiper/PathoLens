@@ -323,7 +323,7 @@ def main() -> None:
 
     ablation_result = ablation.run_prompt_vs_cond_ablation(
         seq_datasets,
-        out_dir="artifacts/qwen3/",
+        out_dir=str(out_dir),
         split="test",
         batch_size=128,
         max_n=5_000,

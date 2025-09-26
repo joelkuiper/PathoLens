@@ -82,7 +82,9 @@ def prepare_prompt_embeddings(
     def _single_token_embedding(token: str) -> torch.Tensor:
         ids = tokenizer.encode(token, add_special_tokens=False)
         if len(ids) != 1:
-            raise ValueError(f"Tokenizer must map '{token}' to exactly one id; got {ids}")
+            raise ValueError(
+                f"Tokenizer must map '{token}' to exactly one id; got {ids}"
+            )
         token_id = torch.tensor(ids, device=dev)
         emb = E(token_id).unsqueeze(0)  # [1, 1, H]
         return emb.expand(txt_emb.size(0), -1, -1)
@@ -93,7 +95,9 @@ def prepare_prompt_embeddings(
     inputs_embeds = torch.cat([start_emb, cond_emb, end_emb, txt_emb], dim=1)
     attn = enc["attention_mask"]
     B = attn.size(0)
-    ones_start = torch.ones((B, start_emb.size(1)), dtype=attn.dtype, device=attn.device)
+    ones_start = torch.ones(
+        (B, start_emb.size(1)), dtype=attn.dtype, device=attn.device
+    )
     ones_cond = torch.ones((B, cond_emb.size(1)), dtype=attn.dtype, device=attn.device)
     ones_end = torch.ones((B, end_emb.size(1)), dtype=attn.dtype, device=attn.device)
     attn = torch.cat([ones_start, ones_cond, ones_end, attn], dim=1)
@@ -296,7 +300,14 @@ def generate_rationale_with_seed(
     ban_label_words: bool = True,
     min_chars: int = 12,
 ) -> tuple[str, str]:
+    """
+    Generate a one-sentence rationale using the same input layout as scoring:
+    [COND_START] + cond_tokens + [COND_END] + chat_text (+ optional seed) → generate.
+    """
+
     dev = next(model.parameters()).device
+
+    # Build the same chat string the user currently uses for rationale
     msgs = [
         {"role": "system", "content": CHAT_SYSTEM},
         {
@@ -308,29 +319,26 @@ def generate_rationale_with_seed(
             ),
         },
     ]
-    chat = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-    enc = tokenizer([chat], return_tensors="pt").to(dev)
+    chat = tokenizer.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True
+    )
 
+    # Get embeddings with COND_START / COND_END and attention aligned
+    inputs_embeds, attn = prepare_prompt_embeddings(
+        model, tokenizer, [chat], cond_vec_np
+    )  # [1, S, H], [1, S]
+
+    # Optional seed after the text (helps avoid terse stops)
     E = model.get_input_embeddings()
-    txt_emb = E(enc["input_ids"])  # [1, T, H]
-
-    cond = _to_numpy_cond(cond_vec_np)
-    cond_tensor = torch.from_numpy(cond).to(dev, dtype=txt_emb.dtype)  # [1, D]
-    cond_emb, _ = model.cond_projector(cond_tensor)  # [1, K, H]
-
-    seed_ids = tokenizer.encode(seed_text, add_special_tokens=False)
-    if seed_ids:
-        seed_emb = E(torch.tensor([seed_ids], device=dev))
-        inputs_embeds = torch.cat([cond_emb, txt_emb, seed_emb], dim=1)
-        seed_len = seed_emb.size(1)
-    else:
-        inputs_embeds = torch.cat([cond_emb, txt_emb], dim=1)
-        seed_len = 0
-
-    attn = enc["attention_mask"]
-    K = cond_emb.size(1)
-    ones = torch.ones((attn.size(0), K + seed_len), dtype=attn.dtype, device=attn.device)
-    attn = torch.cat([ones, attn], dim=1)
+    if seed_text:
+        seed_ids = tokenizer.encode(seed_text, add_special_tokens=False)
+        if seed_ids:
+            seed_emb = E(torch.tensor([seed_ids], device=dev))  # [1, Ls, H]
+            inputs_embeds = torch.cat([inputs_embeds, seed_emb], dim=1)
+            ones = torch.ones(
+                (attn.size(0), seed_emb.size(1)), dtype=attn.dtype, device=attn.device
+            )
+            attn = torch.cat([attn, ones], dim=1)
 
     bad_words = _light_badwords_for_labels(tokenizer) if ban_label_words else None
 
@@ -358,11 +366,9 @@ def generate_rationale_with_seed(
     if cleaned:
         return cleaned, combined_raw
 
+    # fallback: accept super short text if needed
     fallback_text, fallback_raw = _clean_generated_rationale(
-        raw,
-        seed_text=seed_text,
-        ban_label_words=ban_label_words,
-        min_chars=0,
+        raw, seed_text=seed_text, ban_label_words=ban_label_words, min_chars=0
     )
     if fallback_text:
         return fallback_text, fallback_raw
