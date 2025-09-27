@@ -176,7 +176,11 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     with cfg_path.open("rb") as f:
         raw = tomllib.load(f)
 
-    base = cfg_path.parent
+    # Allow relative paths in the configuration to resolve from the invocation
+    # directory (i.e. the project root / current working directory) instead of
+    # the location of the TOML file. This makes it easier to share configs
+    # without embedding repo-specific directory layouts.
+    base = Path.cwd()
     paths_raw = _section(raw, "Paths")
     required = {"clinvar", "fasta", "go", "artifacts"}
     missing = sorted(required - set(paths_raw))
