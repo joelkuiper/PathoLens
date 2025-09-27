@@ -318,38 +318,125 @@ def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
     )
 
 
-def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: LLMRunConfig):
-    print("\n========== SMOKE CHECKS ==========")
-    total_train, total_val = len(seq_ds_dict["train"]), len(seq_ds_dict["val"])
-    print(f"[SMOKE] Train size: {total_train}  |  Val size: {total_val}")
-
+def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig"):
+    """
+    Strict smoke test:
+      - Relies on `_true_label_from_meta` and `build_ctx_from_row` (no fallbacks).
+      - Prints split sizes and full label prevalence for train/val/test.
+      - Shows one concrete chat example (context + prompt) and tokenization lengths.
+      - Verifies special conditioning tokens map to exactly one tokenizer id.
+      - Prints label-token diagnostics for BIN_LABELS.
+      - Reports conditioning block dimensions from the training dataset.
+    """
     from collections import Counter
+    import numpy as np
 
-    def label_stats(ds, N=5000):
+    # --- Imports from your codebase (required) ---
+    from .chat import build_chat_strings
+    from .config import BIN_LABELS, COND_START_TOKEN, COND_END_TOKEN
+
+    print("\n========== SMOKE CHECKS ==========")
+
+    # --- Split sizes ---
+    for split in ("train", "val", "test"):
+        if split in seq_ds_dict:
+            print(f"[SMOKE] {split:5s} size: {len(seq_ds_dict[split])}")
+    if "train" not in seq_ds_dict or "val" not in seq_ds_dict:
+        raise KeyError("[SMOKE] Expected 'train' and 'val' splits in seq_ds_dict.")
+
+    def label_stats(ds):
         ys = []
-        for i in range(min(len(ds), N)):
+        for i in range(len(ds)):
             row = ds.meta.iloc[i]
             y = _true_label_from_meta(row)
-            if y is not None:
-                ys.append(int(y))
+            ys.append(int(y))
         c = Counter(ys)
-        return {"n": len(ys), "pos": c.get(1, 0), "neg": c.get(0, 0)}
+        n = len(ys)
+        pos = c.get(1, 0)
+        neg = c.get(0, 0)
+        frac_pos = pos / n if n else float("nan")
+        return {"n": n, "pos": pos, "neg": neg, "frac_pos": frac_pos}
 
     tr = label_stats(seq_ds_dict["train"])
     va = label_stats(seq_ds_dict["val"])
     print(
-        f"[SMOKE] Label coverage (≤5k): train n={tr['n']} (+:{tr['pos']}, -:{tr['neg']}), val n={va['n']} (+:{va['pos']}, -:{va['neg']})"
+        f"[SMOKE] Label coverage (full): train n={tr['n']} (+:{tr['pos']}, -:{tr['neg']}, pos%={tr['frac_pos']:.3f})"
+    )
+    print(
+        f"[SMOKE] Label coverage (full): val n={va['n']} (+:{va['pos']}, -:{va['neg']}, pos%={va['frac_pos']:.3f})"
+    )
+    if "test" in seq_ds_dict:
+        te = label_stats(seq_ds_dict["test"])
+        print(
+            f"[SMOKE] Label coverage (full): test n={te['n']} (+:{te['pos']}, -:{te['neg']}, pos%={te['frac_pos']:.3f})"
+        )
+
+    # --- Conditioning dims from training dataset ---
+    ds_tr = seq_ds_dict["train"]
+    D_eff = int(getattr(ds_tr, "D_eff"))
+    D_go = int(getattr(ds_tr, "D_go", 0) or 0)
+    D_prot = int(getattr(ds_tr, "D_prot", 0) or 0)
+    D_cond = D_eff + D_go + D_prot
+    print(f"[SMOKE] D_eff={D_eff}  D_go={D_go}  D_prot={D_prot}  → D_cond={D_cond}")
+
+    # --- Special tokens must be single ids ---
+    def _single_id(token: str) -> int:
+        ids = tokenizer.encode(token, add_special_tokens=False)
+        if len(ids) != 1:
+            raise ValueError(
+                f"[SMOKE] Token '{token}' must map to exactly one id; got {ids}"
+            )
+        return ids[0]
+
+    cond_start_id = _single_id(COND_START_TOKEN)
+    cond_end_id = _single_id(COND_END_TOKEN)
+    print(f"[SMOKE] COND_START='{COND_START_TOKEN}' → id={cond_start_id}")
+    print(f"[SMOKE] COND_END  ='{COND_END_TOKEN}' → id={cond_end_id}")
+
+    # --- Label tokenization diagnostics ---
+    for lw in BIN_LABELS:
+        ids_no_space = tokenizer.encode(lw, add_special_tokens=False)
+        ids_space = tokenizer.encode(" " + lw, add_special_tokens=False)
+        print(f"[SMOKE] Label '{lw}': ids={ids_no_space}  |  ids(space)={ids_space}")
+
+    # --- Example context + chat strings ---
+    row0 = ds_tr.meta.iloc[0]
+    ctx0 = build_ctx_from_row(row0)
+    base_prompt = f"Variant context:\n{ctx0}\n\nPredict label:"
+    prompts, prompts_full = build_chat_strings(tokenizer, [base_prompt], ["Benign"])
+
+    print("[SMOKE] Example context:")
+    print(ctx0)
+    print(
+        "[SMOKE] Chat prompt (trunc 300):", prompts[0][:300].replace("\n", "\\n"), "..."
+    )
+    print(
+        "[SMOKE] Chat full   (trunc 300):",
+        prompts_full[0][:300].replace("\n", "\\n"),
+        "...",
     )
 
-    row0 = seq_ds_dict["train"].meta.iloc[0]
-    ctx0 = build_ctx_from_row(row0)
-    from .chat import build_chat_strings
+    # --- Token counts ---
+    enc_prompt = tokenizer(
+        prompts, return_tensors="pt", padding=False, truncation=False
+    )
+    enc_full = tokenizer(
+        prompts_full, return_tensors="pt", padding=False, truncation=False
+    )
+    print(
+        f"[SMOKE] Token count: prompt={enc_prompt['input_ids'].shape[1]}  |  prompt+label={enc_full['input_ids'].shape[1]}"
+    )
 
-    p0 = f"Variant context (no phenotype):\n{ctx0}\n\nReturn label now:"
-    pr, fu = build_chat_strings(tokenizer, [p0], ["Benign"])
-    print("[SMOKE] Example context:\n", ctx0)
-    print("[SMOKE] Chat prompt (trunc 200):", pr[0][:200].replace("\n", "\\n"), "...")
-    print("[SMOKE] Chat full   (trunc 200):", fu[0][:200].replace("\n", "\\n"), "...")
+    # --- First item feature sanity ---
+    x0, *_ = ds_tr[0]
+    x0 = x0 if isinstance(x0, np.ndarray) else x0.numpy()
+    finite = np.isfinite(x0)
+    print(
+        f"[SMOKE] First feature vector: shape={tuple(x0.shape)}  finite%={(finite.mean()*100):.2f}%  "
+        f"min={np.nanmin(x0):.4f}  max={np.nanmax(x0):.4f}"
+    )
+
+    print("========== END SMOKE CHECKS ==========\n")
 
 
 def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, Any]:
