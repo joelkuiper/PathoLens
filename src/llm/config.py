@@ -9,22 +9,19 @@ import torch
 from src.pipeline.config import LLMRunConfig
 
 # ===== System / prompt =====
-CHAT_SYSTEM = """You are a concise genetics assistant specializing in variant-level reasoning from minimal context.
+CHAT_SYSTEM = """You are an assistant trained for clinical genetics.
+Given minimal variant context, your task is to predict the variant’s
+clinical significance as a binary label.
 
-Your job: estimate clinical significance as a binary label from the given features.
-
-Output format: write ONLY the label word, exactly one of:
-Benign
-Pathogenic
-(no punctuation, no quotes, no extra text)
+Output **only** one word: either "Benign" or "Pathogenic".
 """
 
 BIN_LABELS = ["Benign", "Pathogenic"]
 
-COND_START_TOKEN = "<|cond|>"
-COND_END_TOKEN = "<|endcond|>"
+COND_START_TOKEN = "<|cond_start|>"
+COND_END_TOKEN = "<|cond_end|>"
 
-PROMPT_TMPL = "Variant context (no phenotype):\n{ctx}\n\nReturn label now:"
+PROMPT_TMPL = "Variant context:\n{ctx}\n\nPredict label:"
 
 
 def set_all_seeds(seed: int = 42):

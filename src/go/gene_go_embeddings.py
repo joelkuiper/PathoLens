@@ -24,7 +24,6 @@ class GeneGOEmbeddings:
         self.uppercase = uppercase_keys
 
         if normalize:
-            # L2-normalize rows (optional but often helpful before CLIP concat)
             norms = np.linalg.norm(self.emb, axis=1, keepdims=True) + 1e-8
             self.emb = self.emb / norms
 
