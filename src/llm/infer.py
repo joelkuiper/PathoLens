@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import re
-from typing import Any, Dict, Optional, Sequence, Match
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 import torch
 
 from .config import (
     BIN_LABELS,
-    CHAT_SYSTEM,
     COND_START_TOKEN,
     COND_END_TOKEN,
 )
-from .chat import build_chat_strings, sanitize_model_text
+from .chat import build_chat_strings
 
 
 def encode_label_variants(tokenizer, label_word: str) -> list[list[int]]:
@@ -197,235 +195,10 @@ def predict_label_with_probs(
     }
 
 
-def _light_badwords_for_labels(tokenizer) -> list[list[int]]:
-    out = []
-    for word in BIN_LABELS:
-        for form in (word, " " + word):
-            ids = tokenizer.encode(form, add_special_tokens=False)
-            if ids:
-                out.append(ids)
-    return out
-
-
-def _rationale_instruction_for(label_word: str) -> str:
-    if label_word == "Pathogenic":
-        hint = "deleterious (disease-causing)"
-    else:
-        hint = "tolerated/neutral (not disease-causing)"
-    return (
-        f"Assume the predicted class is {hint}. "
-        "Write one short sentence explaining why this classification is plausible based only on the given features. "
-        "Do not use the words 'Benign' or 'Pathogenic'."
-    )
-
-
-_LABEL_WORD_RX = re.compile(r"(?i)\b(benign|pathogenic)\b")
-_LABEL_WORD_REPLACEMENTS = {
-    "benign": "likely harmless",
-    "pathogenic": "likely disease-causing",
-}
-
-
-def _replace_label_words(text: str) -> str:
-    def repl(match: Match[str]) -> str:
-        word = match.group(0)
-        key = match.group(1).lower()
-        replacement = _LABEL_WORD_REPLACEMENTS.get(key, "")
-        if not replacement:
-            return ""
-        if word.isupper():
-            return replacement.upper()
-        if word[0].isupper():
-            return replacement.capitalize()
-        return replacement
-
-    return _LABEL_WORD_RX.sub(repl, text)
-
-
-def _combine_seed_with_body(seed_text: str, body: str) -> str:
-    seed_clean = (seed_text or "").strip()
-    body_clean = (body or "").strip()
-    if not seed_clean:
-        return body_clean
-    if not body_clean:
-        return seed_clean
-    if body_clean.lower().startswith(seed_clean.lower()):
-        return body_clean
-    joiner = "" if body_clean[:1] in ",.!?:;" else " "
-    return f"{seed_clean}{joiner}{body_clean}"
-
-
-def _clean_generated_rationale(
-    raw_text: str,
-    *,
-    seed_text: str,
-    ban_label_words: bool,
-    min_chars: int,
-) -> tuple[str, str]:
-    combined_raw = _combine_seed_with_body(seed_text, raw_text.strip())
-    txt = sanitize_model_text(raw_text).strip()
-    if not txt:
-        return "", combined_raw
-
-    txt = re.sub(r"\s+", " ", txt).strip()
-    txt = re.split(r"(?<=[.!?])\s", txt)[0].strip()
-    if not txt:
-        return "", combined_raw
-
-    if ban_label_words:
-        txt = _replace_label_words(txt)
-        txt = re.sub(r"\s+", " ", txt).strip()
-
-    if min_chars > 0 and len(txt) < min_chars:
-        return "", combined_raw
-
-    final = _combine_seed_with_body(seed_text, txt)
-    return final, combined_raw
-
-
-@torch.inference_mode()
-def generate_rationale_with_seed(
-    model,
-    tokenizer,
-    user_prompt: str,
-    cond_vec_np,
-    label_word: str,
-    *,
-    seed_text: str = " Because",
-    temperature: float = 0.9,
-    top_p: float = 0.92,
-    max_new_tokens: int = 48,
-    min_new_tokens: int = 12,
-    repetition_penalty: float = 1.05,
-    ban_label_words: bool = True,
-    min_chars: int = 12,
-) -> tuple[str, str]:
-    """
-    Generate a one-sentence rationale using the same input layout as scoring:
-    [COND_START] + cond_tokens + [COND_END] + chat_text (+ optional seed) → generate.
-    """
-
-    dev = next(model.parameters()).device
-
-    # Build the same chat string the user currently uses for rationale
-    msgs = [
-        {"role": "system", "content": CHAT_SYSTEM},
-        {
-            "role": "user",
-            "content": (
-                f"{user_prompt}\n\n"
-                f"{_rationale_instruction_for(label_word)}\n"
-                "Rationale:"
-            ),
-        },
-    ]
-    chat = tokenizer.apply_chat_template(
-        msgs, tokenize=False, add_generation_prompt=True
-    )
-
-    # Get embeddings with COND_START / COND_END and attention aligned
-    inputs_embeds, attn = prepare_prompt_embeddings(
-        model, tokenizer, [chat], cond_vec_np
-    )  # [1, S, H], [1, S]
-
-    # Optional seed after the text (helps avoid terse stops)
-    E = model.get_input_embeddings()
-    if seed_text:
-        seed_ids = tokenizer.encode(seed_text, add_special_tokens=False)
-        if seed_ids:
-            seed_emb = E(torch.tensor([seed_ids], device=dev))  # [1, Ls, H]
-            inputs_embeds = torch.cat([inputs_embeds, seed_emb], dim=1)
-            ones = torch.ones(
-                (attn.size(0), seed_emb.size(1)), dtype=attn.dtype, device=attn.device
-            )
-            attn = torch.cat([attn, ones], dim=1)
-
-    bad_words = _light_badwords_for_labels(tokenizer) if ban_label_words else None
-
-    gen = model.generate(
-        inputs_embeds=inputs_embeds,
-        attention_mask=attn,
-        do_sample=True,
-        temperature=temperature,
-        top_p=top_p,
-        max_new_tokens=max_new_tokens,
-        min_new_tokens=min_new_tokens,
-        repetition_penalty=repetition_penalty,
-        bad_words_ids=bad_words,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-    raw = tokenizer.decode(gen[0], skip_special_tokens=True)
-
-    cleaned, combined_raw = _clean_generated_rationale(
-        raw,
-        seed_text=seed_text,
-        ban_label_words=ban_label_words,
-        min_chars=min_chars,
-    )
-    if cleaned:
-        return cleaned, combined_raw
-
-    # fallback: accept super short text if needed
-    fallback_text, fallback_raw = _clean_generated_rationale(
-        raw, seed_text=seed_text, ban_label_words=ban_label_words, min_chars=0
-    )
-    if fallback_text:
-        return fallback_text, fallback_raw
-
-    return "", combined_raw or _combine_seed_with_body(seed_text, "")
-
-
-@torch.inference_mode()
-def generate_label_then_rationale(
-    model,
-    tokenizer,
-    prompt_text: str,
-    cond_vec_np,
-    *,
-    rationale_tokens: int = 48,
-    rationale_temp: float = 0.9,
-    rationale_top_p: float = 0.92,
-    rationale_min_tokens: int = 12,
-    repetition_penalty: float = 1.05,
-    ban_label_in_rationale: bool = True,
-    rationale_seed_text: str = " Because",
-    rationale_min_chars: int = 12,
-) -> Dict[str, Any]:
-    label_out = predict_label_with_probs(model, tokenizer, prompt_text, cond_vec_np)
-    label_word = label_out["label"]
-
-    rationale, raw = generate_rationale_with_seed(
-        model,
-        tokenizer,
-        prompt_text,
-        cond_vec_np,
-        label_word,
-        seed_text=rationale_seed_text,
-        temperature=rationale_temp,
-        top_p=rationale_top_p,
-        max_new_tokens=rationale_tokens,
-        min_new_tokens=rationale_min_tokens,
-        repetition_penalty=repetition_penalty,
-        ban_label_words=ban_label_in_rationale,
-        min_chars=rationale_min_chars,
-    )
-
-    return {
-        "label": label_word,
-        "probs": label_out["probs"],
-        "logprobs": label_out["logprobs"],
-        "rationale": rationale,
-        "raw_rationale": raw,
-    }
-
-
 __all__ = [
     "encode_label_variants",
     "prepare_prompt_embeddings",
     "batched_label_logprobs",
     "score_label_word_logprobs",
     "predict_label_with_probs",
-    "generate_rationale_with_seed",
-    "generate_label_then_rationale",
 ]

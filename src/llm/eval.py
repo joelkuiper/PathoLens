@@ -1,10 +1,8 @@
 # src/llm/eval.py
 # -*- coding: utf-8 -*-
-# Batched evaluation + AUC + feather + optional label→rationale.
+# Batched evaluation + AUC + feather.
 # Notes:
 # - Ground truth is NEVER inserted into prompts or scoring. It is read only to compute metrics.
-# - Rationales are generated AFTER predicting the label, and are conditioned on the PREDICTED label only.
-# - LoRA + conditioning projector remain active for both scoring and rationale generation.
 
 import os
 import re
@@ -18,8 +16,6 @@ from src.llm.load import load_finetuned_model
 from src.llm.modeling import enable_fast_generate
 from src.llm.infer import (
     encode_label_variants,
-    generate_rationale_with_seed,
-    predict_label_with_probs,
     prepare_prompt_embeddings,
     score_label_word_logprobs,
 )
@@ -74,11 +70,6 @@ def evaluate_split_batched(
     model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
     max_n: Optional[int] = None,
     batch_size: int = 64,
-    sample_rationales: int = 0,  # generate AFTER predicting label
-    rationale_tokens: int = 48,
-    rationale_temp: float = 0.9,
-    rationale_top_p: float = 0.92,
-    guard_prompts: bool = True,
 ) -> Dict[str, Any]:
     """
     IMPORTANT: We do NOT insert ground-truth anywhere into the prompt or scoring.
@@ -227,44 +218,6 @@ def evaluate_split_batched(
         "predictions_path": preds_path,
     }
 
-    # Optional: rationales AFTER prediction (LoRA ON, cond used)
-    if sample_rationales > 0:
-        rng = np.random.default_rng(0)
-        pool = rng.choice(idxs, size=min(sample_rationales, len(idxs)), replace=False)
-        rats = []
-        for i in pool:
-            x, *_ = ds[i]
-            cond_vec = x.numpy()
-            row = ds.meta.iloc[i]
-            ctx = build_ctx_from_row(row)
-            if getattr(ds, "_force_blank_prompts", False):
-                prompt = getattr(
-                    ds,
-                    "_force_blank_prompt_template",
-                    PROMPT_TMPL.format(ctx=""),
-                )
-            else:
-                prompt = PROMPT_TMPL.format(ctx=ctx)
-
-            pred = predict_label_with_probs(model, tok, prompt, cond_vec)
-            label_word = pred["label"]
-
-            rat, _ = generate_rationale_with_seed(
-                model,
-                tok,
-                prompt,
-                cond_vec,
-                label_word,
-                seed_text=" Because",
-                temperature=rationale_temp,
-                top_p=rationale_top_p,
-                max_new_tokens=rationale_tokens,
-                min_new_tokens=12,
-                repetition_penalty=1.05,
-            )
-            rats.append({"idx": int(i), "pred_label": label_word, "rationale": rat})
-        out["rationales"] = rats
-
     return out
 
 
@@ -288,7 +241,6 @@ def run_all(
     max_n_val: Optional[int] = None,
     max_n_test: Optional[int] = None,
     batch_size: int = 64,
-    sample_rationales: int = 4,
 ):
     res_val = evaluate_split_batched(
         seq_ds,
@@ -297,7 +249,6 @@ def run_all(
         model_id=model_id,
         max_n=max_n_val,
         batch_size=batch_size,
-        sample_rationales=sample_rationales,
     )
     print("\nVAL metrics:")
     print(
@@ -322,7 +273,6 @@ def run_all(
         model_id=model_id,
         max_n=max_n_test,
         batch_size=batch_size,
-        sample_rationales=sample_rationales,
     )
     print("\nTEST metrics:")
     print(

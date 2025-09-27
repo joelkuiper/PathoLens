@@ -388,7 +388,6 @@ def run_prompt_vs_cond_ablation(
             split=split,
             max_n=max_n,
             batch_size=batch_size,
-            sample_rationales=0,
         )
     results["cond_only"] = out
 
@@ -401,7 +400,6 @@ def run_prompt_vs_cond_ablation(
         split=split,
         max_n=max_n,
         batch_size=batch_size,
-        sample_rationales=0,
     )
     results["cond+prompt"] = out
 
@@ -415,7 +413,6 @@ def run_prompt_vs_cond_ablation(
             split=split,
             max_n=max_n,
             batch_size=batch_size,
-            sample_rationales=0,
         )
         results["cond_zero_dna"] = out
 
@@ -430,7 +427,6 @@ def run_prompt_vs_cond_ablation(
             split=split,
             max_n=max_n,
             batch_size=batch_size,
-            sample_rationales=0,
         )
         results["cond_zero_go"] = out
 
@@ -447,7 +443,6 @@ def run_prompt_vs_cond_ablation(
             split=split,
             max_n=max_n,
             batch_size=batch_size,
-            sample_rationales=0,
         )
         results["cond_zero_prot"] = out
     else:
@@ -462,7 +457,6 @@ def run_prompt_vs_cond_ablation(
         split=split,
         max_n=max_n,
         batch_size=batch_size,
-        sample_rationales=0,
     )
     results["prompt_only"] = out
 
@@ -491,7 +485,6 @@ def run_prompt_vs_cond_ablation(
                 split=split,
                 max_n=max_n,
                 batch_size=batch_size,
-                sample_rationales=0,
             )
         results[name] = out
 
@@ -512,7 +505,6 @@ def run_prompt_vs_cond_ablation(
         split=split,
         max_n=max_n,
         batch_size=batch_size,
-        sample_rationales=0,
     )
     results["cond+noise"] = out
 
@@ -526,7 +518,6 @@ def run_prompt_vs_cond_ablation(
             split=split,
             max_n=max_n,
             batch_size=batch_size,
-            sample_rationales=0,
         )
         results["cond+permute"] = out
 
@@ -542,7 +533,6 @@ def run_prompt_vs_cond_ablation(
             split=split,
             max_n=max_n,
             batch_size=batch_size,
-            sample_rationales=0,
         )
         results["pure-noise"] = out
 
@@ -559,7 +549,6 @@ def run_prompt_vs_cond_ablation(
                 split=split,
                 max_n=max_n,
                 batch_size=batch_size,
-                sample_rationales=0,
             )
             results[tag] = out
 
