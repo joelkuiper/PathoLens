@@ -328,7 +328,6 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
       - Prints label-token diagnostics for BIN_LABELS.
       - Reports conditioning block dimensions from the training dataset.
     """
-    from collections import Counter
     import numpy as np
 
     # --- Imports from your codebase (required) ---
@@ -345,16 +344,16 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
         raise KeyError("[SMOKE] Expected 'train' and 'val' splits in seq_ds_dict.")
 
     def label_stats(ds):
-        ys = []
-        for i in range(len(ds)):
-            row = ds.meta.iloc[i]
-            y = _true_label_from_meta(row)
-            ys.append(int(y))
-        c = Counter(ys)
-        n = len(ys)
-        pos = c.get(1, 0)
-        neg = c.get(0, 0)
-        frac_pos = pos / n if n else float("nan")
+        # Apply in vectorized form instead of row-by-row
+        ys = ds.meta.apply(_true_label_from_meta, axis=1).astype(int).to_numpy()
+
+        n = ys.size
+        if n == 0:
+            return {"n": 0, "pos": 0, "neg": 0, "frac_pos": float("nan")}
+
+        pos = int((ys == 1).sum())
+        neg = n - pos
+        frac_pos = pos / n
         return {"n": n, "pos": pos, "neg": neg, "frac_pos": frac_pos}
 
     tr = label_stats(seq_ds_dict["train"])
