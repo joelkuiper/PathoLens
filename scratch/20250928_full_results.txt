@@ -1,0 +1,74 @@
+Full dataset
+[SMOKE] train size: 272134
+[SMOKE] val   size: 31384
+[SMOKE] test  size: 32468
+[SMOKE] Label coverage (full): train n=272134 (+:57209, -:214925, pos%=0.210)
+[SMOKE] Label coverage (full): val n=31384 (+:7526, -:23858, pos%=0.240)
+[SMOKE] Label coverage (full): test n=32468 (+:7169, -:25299, pos%=0.221)
+
+
+TEST metrics:
+{'n': 32468, 'accuracy': 0.9473019588517926, 'precision': 0.8963113563752542, 'recall': 0.8609289998605105, 'f1': 0.8782639630024902, 'auc_roc': 0.9827902504211163, 'auc_pr': 0.9528706870524094}
+Confusion: [[24585, 714], [997, 6172]]
+Saved TEST predictions to: /media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather
+{'test': {'accuracy': 0.9473019588517926,
+          'auc_pr': 0.9528706870524094,
+          'auc_roc': 0.9827902504211163,
+          'confusion_matrix': [[24585, 714], [997, 6172]],
+          'f1': 0.8782639630024902,
+          'n': 32468,
+          'precision': 0.8963113563752542,
+          'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/test_scored.feather',
+          'recall': 0.8609289998605105,
+          'report': '              precision    recall  f1-score   support\n'
+                    '\n'
+                    '      Benign      0.961     0.972     0.966     25299\n'
+                    '  Pathogenic      0.896     0.861     0.878      7169\n'
+                    '\n'
+                    '    accuracy                          0.947     32468\n'
+                    '   macro avg      0.929     0.916     0.922     32468\n'
+                    'weighted avg      0.947     0.947     0.947     32468\n',
+          'split': 'test'},
+ 'val': {'accuracy': 0.9519181748661738,
+         'auc_pr': 0.9670454506964666,
+         'auc_roc': 0.9867950464600022,
+         'confusion_matrix': [[23204, 654], [855, 6671]],
+         'f1': 0.8983906807622383,
+         'n': 31384,
+         'precision': 0.9107167235494881,
+         'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/full/qwen3/val_scored.feather',
+         'recall': 0.8863938347063514,
+         'report': '              precision    recall  f1-score   support\n'
+                   '\n'
+                   '      Benign      0.964     0.973     0.969     23858\n'
+                   '  Pathogenic      0.911     0.886     0.898      7526\n'
+                   '\n'
+                   '    accuracy                          0.952     31384\n'
+                   '   macro avg      0.938     0.929     0.933     31384\n'
+                   'weighted avg      0.952     0.952     0.952     31384\n',
+         'split': 'val'}}
+[llm] running ablation test
+Ablation summary [test]
+Mode                N      Acc       F1    ROC-AUC     PR-AUC
+------------------------------------------------------
+cond+prompt     10000   0.9116   0.8281     0.9643     0.9213
+cond_only       10000   0.8141   0.6032     0.7947     0.6486
+cond_zero_dna   10000   0.9129   0.8285     0.9646     0.9225
+cond_zero_prot  10000   0.9049   0.8066     0.9568     0.9069
+cond_zero_go    10000   0.9121   0.8252     0.9652     0.9222
+prompt_only     10000   0.8978   0.7766     0.9582     0.9081
+prompt_no_hgvsp  10000   0.9051   0.8113     0.9570     0.9089
+prompt_no_hgvsc  10000   0.9114   0.8289     0.9600     0.9171
+prompt_no_gene  10000   0.9041   0.8121     0.9625     0.9138
+cond+noise      10000   0.8667   0.7736     0.9533     0.8953
+
+Δ vs cond+prompt:
+- cond_only     ΔAcc=-0.0975  ΔF1=-0.2249  ΔROC-AUC=-0.1696  ΔPR-AUC=-0.2727
+- cond_zero_dna  ΔAcc=+0.0013  ΔF1=+0.0004  ΔROC-AUC=+0.0003  ΔPR-AUC=+0.0012
+- cond_zero_prot  ΔAcc=-0.0067  ΔF1=-0.0216  ΔROC-AUC=-0.0075  ΔPR-AUC=-0.0144
+- cond_zero_go  ΔAcc=+0.0005  ΔF1=-0.0029  ΔROC-AUC=+0.0009  ΔPR-AUC=+0.0009
+- prompt_only   ΔAcc=-0.0138  ΔF1=-0.0516  ΔROC-AUC=-0.0061  ΔPR-AUC=-0.0132
+- prompt_no_hgvsp  ΔAcc=-0.0065  ΔF1=-0.0169  ΔROC-AUC=-0.0073  ΔPR-AUC=-0.0124
+- prompt_no_hgvsc  ΔAcc=-0.0002  ΔF1=+0.0007  ΔROC-AUC=-0.0043  ΔPR-AUC=-0.0042
+- prompt_no_gene  ΔAcc=-0.0075  ΔF1=-0.0161  ΔROC-AUC=-0.0018  ΔPR-AUC=-0.0075
+- cond+noise    ΔAcc=-0.0449  ΔF1=-0.0545  ΔROC-AUC=-0.0110  ΔPR-AUC=-0.0260

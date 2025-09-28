@@ -1,0 +1,332 @@
+Note: L2-norm for GO embedding = False in this run. Check the ablation results!
+
+========== SMOKE CHECKS ==========
+[SMOKE] train size: 41354
+[SMOKE] val   size: 5619
+[SMOKE] test  size: 5170
+[SMOKE] Label coverage (full): train n=41354 (+:13505, -:27849, pos%=0.327)
+[SMOKE] Label coverage (full): val n=5619 (+:2007, -:3612, pos%=0.357)
+[SMOKE] Label coverage (full): test n=5170 (+:2053, -:3117, pos%=0.397)
+[SMOKE] D_eff=1280  D_go=256  D_prot=480  → D_cond=2016
+[SMOKE] COND_START='<|cond_start|>' → id=151669
+[SMOKE] COND_END  ='<|cond_end|>' → id=151670
+[SMOKE] Label 'Benign': ids=[24566, 622]  |  ids(space)=[7355, 622]
+[SMOKE] Label 'Pathogenic': ids=[1820, 28469]  |  ids(space)=[7933, 28469]
+[SMOKE] Example context:
+Gene: HFE
+HGVS.c: c.848A>C
+HGVS.p: p.Gln283Pro
+Most severe consequence: missense variant
+
+
+VAL metrics:
+{'n': 5619, 'accuracy': 0.808328884143086, 'precision': 0.7554945054945055, 'recall': 0.6851021425012457, 'f1': 0.7185785210347531, 'auc_roc': 0.8860668170815215, 'auc_pr': 0.8093548663556819}
+Confusion: [[3167, 445], [632, 1375]]
+
+
+TEST metrics:
+{'n': 5170, 'accuracy': 0.8526112185686654, 'precision': 0.8301790281329924, 'recall': 0.7905504140282513, 'f1': 0.8098802395209581, 'auc_roc': 0.9233894981576606, 'auc_pr': 0.888810011626029}
+Confusion: [[2785, 332], [430, 1623]]
+
+{'test': {'accuracy': 0.8526112185686654,
+          'auc_pr': 0.888810011626029,
+          'auc_roc': 0.9233894981576606,
+          'confusion_matrix': [[2785, 332], [430, 1623]],
+          'f1': 0.8098802395209581,
+          'n': 5170,
+          'precision': 0.8301790281329924,
+          'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+          'recall': 0.7905504140282513,
+          'report': '              precision    recall  f1-score   support\n'
+                    '\n'
+                    '      Benign      0.866     0.893     0.880      3117\n'
+                    '  Pathogenic      0.830     0.791     0.810      2053\n'
+                    '\n'
+                    '    accuracy                          0.853      5170\n'
+                    '   macro avg      0.848     0.842     0.845      5170\n'
+                    'weighted avg      0.852     0.853     0.852      5170\n',
+          'split': 'test'},
+ 'val': {'accuracy': 0.808328884143086,
+         'auc_pr': 0.8093548663556819,
+         'auc_roc': 0.8860668170815215,
+         'confusion_matrix': [[3167, 445], [632, 1375]],
+         'f1': 0.7185785210347531,
+         'n': 5619,
+         'precision': 0.7554945054945055,
+         'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/val_scored.feather',
+         'recall': 0.6851021425012457,
+         'report': '              precision    recall  f1-score   support\n'
+                   '\n'
+                   '      Benign      0.834     0.877     0.855      3612\n'
+                   '  Pathogenic      0.755     0.685     0.719      2007\n'
+                   '\n'
+                   '    accuracy                          0.808      5619\n'
+                   '   macro avg      0.795     0.781     0.787      5619\n'
+                   'weighted avg      0.806     0.808     0.806      5619\n',
+         'split': 'val'}}
+
+
+Ablation summary [test]
+Mode                N      Acc       F1    ROC-AUC     PR-AUC
+------------------------------------------------------
+cond+prompt      5000   0.8512   0.8068     0.9223     0.8852
+cond_only        5000   0.6582   0.2475     0.7638     0.7181
+cond_zero_dna    5000   0.8532   0.8095     0.9234     0.8867
+cond_zero_prot   5000   0.8236   0.7518     0.8990     0.8493
+cond_zero_go     5000   0.8126   0.7116     0.9114     0.8793
+prompt_only      5000   0.7374   0.5114     0.8778     0.8388
+prompt_no_hgvsp   5000   0.8058   0.7177     0.8948     0.8388
+prompt_no_hgvsc   5000   0.8482   0.8014     0.9218     0.8845
+prompt_no_gene   5000   0.7520   0.6344     0.8107     0.7585
+cond+noise       5000   0.7610   0.7218     0.8482     0.7937
+
+Δ vs cond+prompt:
+- cond_only     ΔAcc=-0.1930  ΔF1=-0.5593  ΔROC-AUC=-0.1585  ΔPR-AUC=-0.1671
+- cond_zero_dna  ΔAcc=+0.0020  ΔF1=+0.0028  ΔROC-AUC=+0.0011  ΔPR-AUC=+0.0015
+- cond_zero_prot  ΔAcc=-0.0276  ΔF1=-0.0549  ΔROC-AUC=-0.0233  ΔPR-AUC=-0.0360
+- cond_zero_go  ΔAcc=-0.0386  ΔF1=-0.0951  ΔROC-AUC=-0.0109  ΔPR-AUC=-0.0060
+- prompt_only   ΔAcc=-0.1138  ΔF1=-0.2954  ΔROC-AUC=-0.0445  ΔPR-AUC=-0.0464
+- prompt_no_hgvsp  ΔAcc=-0.0454  ΔF1=-0.0891  ΔROC-AUC=-0.0275  ΔPR-AUC=-0.0465
+- prompt_no_hgvsc  ΔAcc=-0.0030  ΔF1=-0.0054  ΔROC-AUC=-0.0005  ΔPR-AUC=-0.0007
+- prompt_no_gene  ΔAcc=-0.0992  ΔF1=-0.1723  ΔROC-AUC=-0.1116  ΔPR-AUC=-0.1267
+- cond+noise    ΔAcc=-0.0902  ΔF1=-0.0850  ΔROC-AUC=-0.0742  ΔPR-AUC=-0.0915
+{'cond+noise': {'accuracy': 0.761,
+                'auc_pr': 0.7937079426351233,
+                'auc_roc': 0.8481532036472044,
+                'confusion_matrix': [[2255, 781], [414, 1550]],
+                'f1': 0.7217694994179278,
+                'n': 5000,
+                'precision': 0.6649506649506649,
+                'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                'recall': 0.7892057026476579,
+                'report': '              precision    recall  f1-score   '
+                          'support\n'
+                          '\n'
+                          '      Benign      0.845     0.743     0.791      '
+                          '3036\n'
+                          '  Pathogenic      0.665     0.789     0.722      '
+                          '1964\n'
+                          '\n'
+                          '    accuracy                          0.761      '
+                          '5000\n'
+                          '   macro avg      0.755     0.766     0.756      '
+                          '5000\n'
+                          'weighted avg      0.774     0.761     0.764      '
+                          '5000\n',
+                'split': 'test'},
+ 'cond+prompt': {'accuracy': 0.8512,
+                 'auc_pr': 0.8852469040532971,
+                 'auc_roc': 0.9223061382889374,
+                 'confusion_matrix': [[2703, 333], [411, 1553]],
+                 'f1': 0.8067532467532468,
+                 'n': 5000,
+                 'precision': 0.8234358430540827,
+                 'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                 'recall': 0.7907331975560081,
+                 'report': '              precision    recall  f1-score   '
+                           'support\n'
+                           '\n'
+                           '      Benign      0.868     0.890     0.879      '
+                           '3036\n'
+                           '  Pathogenic      0.823     0.791     0.807      '
+                           '1964\n'
+                           '\n'
+                           '    accuracy                          0.851      '
+                           '5000\n'
+                           '   macro avg      0.846     0.841     0.843      '
+                           '5000\n'
+                           'weighted avg      0.851     0.851     0.851      '
+                           '5000\n',
+                 'split': 'test'},
+ 'cond_only': {'accuracy': 0.6582,
+               'auc_pr': 0.7181255898276682,
+               'auc_roc': 0.7637906392804339,
+               'confusion_matrix': [[3010, 26], [1683, 281]],
+               'f1': 0.24746807573756055,
+               'n': 5000,
+               'precision': 0.9153094462540716,
+               'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+               'recall': 0.1430753564154786,
+               'report': '              precision    recall  f1-score   '
+                         'support\n'
+                         '\n'
+                         '      Benign      0.641     0.991     0.779      '
+                         '3036\n'
+                         '  Pathogenic      0.915     0.143     0.247      '
+                         '1964\n'
+                         '\n'
+                         '    accuracy                          0.658      '
+                         '5000\n'
+                         '   macro avg      0.778     0.567     0.513      '
+                         '5000\n'
+                         'weighted avg      0.749     0.658     0.570      '
+                         '5000\n',
+               'split': 'test'},
+ 'cond_zero_dna': {'accuracy': 0.8532,
+                   'auc_pr': 0.8867123073182849,
+                   'auc_roc': 0.9233831664291905,
+                   'confusion_matrix': [[2706, 330], [404, 1560]],
+                   'f1': 0.809548521017125,
+                   'n': 5000,
+                   'precision': 0.8253968253968254,
+                   'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                   'recall': 0.7942973523421588,
+                   'report': '              precision    recall  f1-score   '
+                             'support\n'
+                             '\n'
+                             '      Benign      0.870     0.891     0.881      '
+                             '3036\n'
+                             '  Pathogenic      0.825     0.794     0.810      '
+                             '1964\n'
+                             '\n'
+                             '    accuracy                          0.853      '
+                             '5000\n'
+                             '   macro avg      0.848     0.843     0.845      '
+                             '5000\n'
+                             'weighted avg      0.853     0.853     0.853      '
+                             '5000\n',
+                   'split': 'test'},
+ 'cond_zero_go': {'accuracy': 0.8126,
+                  'auc_pr': 0.8792809928175339,
+                  'auc_roc': 0.9113817321805677,
+                  'confusion_matrix': [[2907, 129], [808, 1156]],
+                  'f1': 0.7116035703293321,
+                  'n': 5000,
+                  'precision': 0.8996108949416343,
+                  'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                  'recall': 0.5885947046843177,
+                  'report': '              precision    recall  f1-score   '
+                            'support\n'
+                            '\n'
+                            '      Benign      0.783     0.958     0.861      '
+                            '3036\n'
+                            '  Pathogenic      0.900     0.589     0.712      '
+                            '1964\n'
+                            '\n'
+                            '    accuracy                          0.813      '
+                            '5000\n'
+                            '   macro avg      0.841     0.773     0.786      '
+                            '5000\n'
+                            'weighted avg      0.829     0.813     0.802      '
+                            '5000\n',
+                  'split': 'test'},
+ 'cond_zero_prot': {'accuracy': 0.8236,
+                    'auc_pr': 0.8492772042737708,
+                    'auc_roc': 0.8990378358543372,
+                    'confusion_matrix': [[2782, 254], [628, 1336]],
+                    'f1': 0.7518289251547552,
+                    'n': 5000,
+                    'precision': 0.8402515723270441,
+                    'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                    'recall': 0.6802443991853361,
+                    'report': '              precision    recall  f1-score   '
+                              'support\n'
+                              '\n'
+                              '      Benign      0.816     0.916     '
+                              '0.863      3036\n'
+                              '  Pathogenic      0.840     0.680     '
+                              '0.752      1964\n'
+                              '\n'
+                              '    accuracy                          '
+                              '0.824      5000\n'
+                              '   macro avg      0.828     0.798     '
+                              '0.807      5000\n'
+                              'weighted avg      0.825     0.824     '
+                              '0.819      5000\n',
+                    'split': 'test'},
+ 'prompt_no_gene': {'accuracy': 0.752,
+                    'auc_pr': 0.7585432291877251,
+                    'auc_roc': 0.8107427435606397,
+                    'confusion_matrix': [[2684, 352], [888, 1076]],
+                    'f1': 0.6344339622641509,
+                    'n': 5000,
+                    'precision': 0.7535014005602241,
+                    'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                    'recall': 0.5478615071283096,
+                    'report': '              precision    recall  f1-score   '
+                              'support\n'
+                              '\n'
+                              '      Benign      0.751     0.884     '
+                              '0.812      3036\n'
+                              '  Pathogenic      0.754     0.548     '
+                              '0.634      1964\n'
+                              '\n'
+                              '    accuracy                          '
+                              '0.752      5000\n'
+                              '   macro avg      0.752     0.716     '
+                              '0.723      5000\n'
+                              'weighted avg      0.752     0.752     '
+                              '0.742      5000\n',
+                    'split': 'test'},
+ 'prompt_no_hgvsc': {'accuracy': 0.8482,
+                     'auc_pr': 0.8845333509838545,
+                     'auc_roc': 0.9218160921622135,
+                     'confusion_matrix': [[2710, 326], [433, 1531]],
+                     'f1': 0.8013609002878828,
+                     'n': 5000,
+                     'precision': 0.8244480344641896,
+                     'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                     'recall': 0.7795315682281059,
+                     'report': '              precision    recall  f1-score   '
+                               'support\n'
+                               '\n'
+                               '      Benign      0.862     0.893     '
+                               '0.877      3036\n'
+                               '  Pathogenic      0.824     0.780     '
+                               '0.801      1964\n'
+                               '\n'
+                               '    accuracy                          '
+                               '0.848      5000\n'
+                               '   macro avg      0.843     0.836     '
+                               '0.839      5000\n'
+                               'weighted avg      0.847     0.848     '
+                               '0.847      5000\n',
+                     'split': 'test'},
+ 'prompt_no_hgvsp': {'accuracy': 0.8058,
+                     'auc_pr': 0.8387808325673751,
+                     'auc_roc': 0.8947719859982987,
+                     'confusion_matrix': [[2795, 241], [730, 1234]],
+                     'f1': 0.7176504797906368,
+                     'n': 5000,
+                     'precision': 0.8366101694915254,
+                     'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                     'recall': 0.6283095723014257,
+                     'report': '              precision    recall  f1-score   '
+                               'support\n'
+                               '\n'
+                               '      Benign      0.793     0.921     '
+                               '0.852      3036\n'
+                               '  Pathogenic      0.837     0.628     '
+                               '0.718      1964\n'
+                               '\n'
+                               '    accuracy                          '
+                               '0.806      5000\n'
+                               '   macro avg      0.815     0.774     '
+                               '0.785      5000\n'
+                               'weighted avg      0.810     0.806     '
+                               '0.799      5000\n',
+                     'split': 'test'},
+ 'prompt_only': {'accuracy': 0.7374,
+                 'auc_pr': 0.8388081720663673,
+                 'auc_roc': 0.8778131532271265,
+                 'confusion_matrix': [[3000, 36], [1277, 687]],
+                 'f1': 0.51135094901377,
+                 'n': 5000,
+                 'precision': 0.950207468879668,
+                 'predictions_path': '/media/array/Sync/Repositories/VarCLIP/artifacts/missense/qwen3/test_scored.feather',
+                 'recall': 0.34979633401221993,
+                 'report': '              precision    recall  f1-score   '
+                           'support\n'
+                           '\n'
+                           '      Benign      0.701     0.988     0.820      '
+                           '3036\n'
+                           '  Pathogenic      0.950     0.350     0.511      '
+                           '1964\n'
+                           '\n'
+                           '    accuracy                          0.737      '
+                           '5000\n'
+                           '   macro avg      0.826     0.669     0.666      '
+                           '5000\n'
+                           'weighted avg      0.799     0.737     0.699      '
+                           '5000\n',
+                 'split': 'test'}}
