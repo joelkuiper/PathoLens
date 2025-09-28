@@ -326,7 +326,7 @@ def main() -> None:
         out_dir=str(out_dir),
         split="test",
         batch_size=128,
-        max_n=5_000,
+        max_n=10_000,
         scale_sweep=(),
         do_permute=False,
         do_pure_noise=False,
