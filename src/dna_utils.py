@@ -80,20 +80,24 @@ def fetch_dna_window(
 
 def collect_variant_windows(
     df: pd.DataFrame, fasta: Fasta, window: int
-) -> Tuple[pd.DataFrame, List[str], List[str]]:
-    ref_seqs, alt_seqs, keep_idx = [], [], []
+) -> Tuple[pd.DataFrame, List[str], List[str], List[int], List[int]]:
+    ref_seqs, alt_seqs, starts, ends, keep_idx = [], [], [], [], []
     for i, row in tqdm(df.iterrows(), total=len(df), desc="Fetching DNA windows"):
         try:
-            rseq, aseq, *_ = fetch_dna_window(fasta, row, window=window)
+            rseq, aseq, win_start, win_end = fetch_dna_window(
+                fasta, row, window=window
+            )
         except Exception:
             continue
         ref_seqs.append(rseq)
         alt_seqs.append(aseq)
+        starts.append(int(win_start))
+        ends.append(int(win_end))
         keep_idx.append(i)
     if not keep_idx:
         raise RuntimeError("No valid variants matched FASTA/REF.")
     kept = df.loc[keep_idx].reset_index(drop=True)
-    return kept, ref_seqs, alt_seqs
+    return kept, ref_seqs, alt_seqs, starts, ends
 
 
 # ---------------------------
@@ -193,6 +197,8 @@ def write_windows_feather(
     kept_df: pd.DataFrame,
     ref_seqs,
     alt_seqs,
+    start_positions,
+    end_positions,
     out_path: str,
     *,
     window: int,
@@ -203,30 +209,42 @@ def write_windows_feather(
     df = kept_df.copy()
     df["dna_ref_seq"] = list(ref_seqs)
     df["dna_alt_seq"] = list(alt_seqs)
-    df["_dna_window"] = int(window)
-    df["_fasta_path"] = str(fasta_path)
+    if start_positions:
+        df["dna_window_start"] = list(start_positions)
+    if end_positions:
+        df["dna_window_end"] = list(end_positions)
+    df["dna_window_size"] = int(window)
+    df["dna_fasta_path"] = str(fasta_path)
     feather.write_feather(df, out_path)
 
 
 def load_windows_feather(
     path: str, window_bp: int
-) -> tuple[pd.DataFrame, list[str], list[str], int, str]:
+) -> tuple[
+    pd.DataFrame,
+    list[str],
+    list[str],
+    list[int],
+    list[int],
+    int,
+    str,
+]:
     df = pd.read_feather(path)
+    starts = df["dna_window_start"].tolist() if "dna_window_start" in df else []
+    ends = df["dna_window_end"].tolist() if "dna_window_end" in df else []
+    window_size = int(
+        df.get("dna_window_size", pd.Series([window_bp], dtype="int64")).iloc[0]
+    )
+    fasta = str(df.get("dna_fasta_path", pd.Series([""], dtype="string")).iloc[0])
     return (
         df,
         df["dna_ref_seq"].tolist(),
         df["dna_alt_seq"].tolist(),
-        int(df.get("_dna_window", pd.Series([window_bp])).iloc[0]),
-        str(df.get("_fasta_path", pd.Series([""])).iloc[0]),
+        starts,
+        ends,
+        window_size,
+        fasta,
     )
-
-
-def write_variant_meta_feather(kept_df: pd.DataFrame, out_meta: str) -> None:
-    import pyarrow.feather as feather
-
-    kept = kept_df.copy()
-    kept["emb_row"] = np.arange(len(kept), dtype=np.int32)
-    feather.write_feather(kept, out_meta)
 
 
 # ---------------------------
@@ -260,17 +278,33 @@ def process_and_cache_dna(
             os.path.dirname(out_meta), stem.replace(".feather", "") + "_windows.feather"
         )
     if os.path.exists(windows_meta) and not force_windows:
-        kept_df, ref_seqs, alt_seqs, _, _ = load_windows_feather(windows_meta, window)
+        (
+            kept_df,
+            ref_seqs,
+            alt_seqs,
+            start_positions,
+            end_positions,
+            window,
+            fasta_path,
+        ) = load_windows_feather(windows_meta, window)
         print(
             f"[dna][windows] reuse {windows_meta} rows={len(kept_df)} force={force_windows}"
         )
     else:
-        kept_df, ref_seqs, alt_seqs = collect_variant_windows(df, fasta, window=window)
+        (
+            kept_df,
+            ref_seqs,
+            alt_seqs,
+            start_positions,
+            end_positions,
+        ) = collect_variant_windows(df, fasta, window=window)
         fasta_path = getattr(fasta, "filename", "") or ""
         write_windows_feather(
             kept_df,
             ref_seqs,
             alt_seqs,
+            start_positions,
+            end_positions,
             windows_meta,
             window=window,
             fasta_path=fasta_path,
@@ -328,7 +362,14 @@ def process_and_cache_dna(
             f"Alignment mismatch: arrays N={N} vs kept_df N={len(kept_df)}"
         )
     kept_df = kept_df.copy()
-    kept_df["emb_row"] = np.arange(N, dtype=np.int32)
-    write_variant_meta_feather(kept_df, out_meta)
-    print(f"[dna][meta] wrote {out_meta} rows={N}")
+    kept_df["dna_embedding_idx"] = np.arange(N, dtype=np.int32)
+    kept_df["dna_ref_seq"] = list(ref_seqs)
+    kept_df["dna_alt_seq"] = list(alt_seqs)
+    if start_positions:
+        kept_df["dna_window_start"] = list(start_positions)
+    if end_positions:
+        kept_df["dna_window_end"] = list(end_positions)
+    kept_df["dna_window_size"] = int(window)
+    kept_df["dna_fasta_path"] = str(fasta_path)
+    print(f"[dna][meta] prepared frame rows={N}")
     return kept_df, out_npz

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import pandas as pd
+
 from src.seq_dataset import SequenceTowerDataset
 
 from .config import ConfigError, PipelineConfig, load_pipeline_config
@@ -19,15 +21,20 @@ def build_sequence_datasets(
     datasets: Dict[str, SequenceTowerDataset] = {}
     go_npz = manifest.go_npz
     for split, artifact in manifest.splits.items():
-        if not artifact.dna_meta or not artifact.dna_npz:
+        if not artifact.meta or not artifact.dna_npz:
             raise ValueError(f"Manifest entry for '{split}' missing DNA artifacts")
+        if not artifact.protein_npz:
+            raise ValueError(
+                f"Manifest entry for '{split}' missing protein artifacts"
+            )
+        frame = pd.read_feather(artifact.meta)
+
         ds = SequenceTowerDataset(
-            meta_feather=artifact.dna_meta,
+            meta_df=frame,
             dna_npz=artifact.dna_npz,
             go_npz=go_npz,
             make_label=make_label,
             label_col=label_col,
-            protein_meta_feather=artifact.protein_meta,
             protein_npz=artifact.protein_npz,
             protein_eff_key="prot_eff",
             go_normalize=cfg.go.normalize,

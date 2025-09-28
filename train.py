@@ -28,8 +28,10 @@ def _merge_artifacts(
             combined[split] = part
             continue
         existing = combined[split]
-        if part.protein_meta:
-            existing.protein_meta = part.protein_meta
+        if part.meta:
+            existing.meta = part.meta
+        if part.dna_npz:
+            existing.dna_npz = part.dna_npz
         if part.protein_npz:
             existing.protein_npz = part.protein_npz
         existing.extras.update(part.extras)
@@ -263,6 +265,11 @@ def main() -> None:
     dna_artifacts = build_dna_caches(cfg, splits, device)
 
     # ----- Protein caches -----
+    meta_paths = {
+        name: Path(artifact.meta)
+        for name, artifact in dna_artifacts.items()
+        if artifact.meta
+    }
     protein_artifacts = build_protein_caches(
         cfg,
         splits,
@@ -270,6 +277,7 @@ def main() -> None:
         split_paths=split_paths,
         vep_paths=vep_paths,
         vep_tables=vep_tables,
+        meta_paths=meta_paths,
     )
 
     # ----- Manifest -----

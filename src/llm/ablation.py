@@ -175,19 +175,27 @@ class _TransformedSplit:
         return len(self.base)
 
     def __getitem__(self, i):
-        x, y1, y2 = self.base[i]
+        base_item = self.base[i]
+        if isinstance(base_item, tuple):
+            x = base_item[0]
+            extras = base_item[1:]
+            pack_tuple = True
+        else:
+            x = base_item
+            extras = ()
+            pack_tuple = False
+
+        def _to_numpy(val):
+            return val.numpy() if hasattr(val, "numpy") else np.asarray(val, dtype=np.float32)
 
         # Optionally fetch a different vector (permute across dataset)
         if self.cfg.mode == "permute":
             j = int(self.cfg.perm_index[i])  # remap index
-            x_src, _, _ = self.base[j]
-            v = (
-                x_src.numpy()
-                if hasattr(x_src, "numpy")
-                else np.asarray(x_src, dtype=np.float32)
-            )
+            perm_item = self.base[j]
+            perm_x = perm_item[0] if isinstance(perm_item, tuple) else perm_item
+            v = _to_numpy(perm_x)
         else:
-            v = x.numpy() if hasattr(x, "numpy") else np.asarray(x, dtype=np.float32)
+            v = _to_numpy(x)
 
         v = v.astype(np.float32, copy=False)
         mode = self.cfg.mode
@@ -229,7 +237,10 @@ class _TransformedSplit:
                     z[s:e] = 0.0
             z = z.astype(np.float32, copy=False)
 
-        return torch.from_numpy(z), y1, y2
+        out_x = torch.from_numpy(z)
+        if pack_tuple:
+            return (out_x, *extras)
+        return out_x
 
     def __getattr__(self, name):
         return getattr(self.base, name)

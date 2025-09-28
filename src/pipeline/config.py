@@ -77,7 +77,6 @@ class DNAConfig:
 
 @dataclass
 class ProteinConfig:
-    enabled: bool = True
     model_id: str = "facebook/esm2_t12_35M_UR50D"
     batch_size: int = 8
     max_length: int = 2048
@@ -145,17 +144,15 @@ class PipelineConfig:
     run: RunConfig = field(default_factory=RunConfig)
 
     def __post_init__(self) -> None:
-        if self.protein.enabled:
-            missing: list[str] = []
-            if self.protein.vep_cache_dir is None:
-                missing.append("Protein.vep_cache_dir")
-            if not self.protein.vep_fasta_relpath:
-                missing.append("Protein.vep_fasta_relpath")
-            if missing:
-                raise ConfigError(
-                    "Protein processing enabled but missing required fields: "
-                    + ", ".join(missing)
-                )
+        missing: list[str] = []
+        if self.protein.vep_cache_dir is None:
+            missing.append("Protein.vep_cache_dir")
+        if not self.protein.vep_fasta_relpath:
+            missing.append("Protein.vep_fasta_relpath")
+        if missing:
+            raise ConfigError(
+                "Protein processing requires fields: " + ", ".join(missing)
+            )
         if self.run.manifest_path is None:
             default_manifest = self.paths.artifacts / "pipeline_manifest.json"
             self.run.manifest_path = default_manifest
@@ -207,7 +204,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
             ),
         }
     )
-    if protein.enabled and protein.vep_cache_dir is not None:
+    if protein.vep_cache_dir is not None:
         # ensure normalised
         protein.vep_cache_dir = _norm_path(protein.vep_cache_dir)
 

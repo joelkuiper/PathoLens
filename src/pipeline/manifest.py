@@ -9,36 +9,36 @@ from typing import Any, Dict, Optional
 
 @dataclass
 class SplitArtifact:
-    dna_meta: Optional[str] = None
+    meta: Optional[str] = None
     dna_npz: Optional[str] = None
-    protein_meta: Optional[str] = None
     protein_npz: Optional[str] = None
     extras: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
-        if self.dna_meta or self.dna_npz:
-            data["dna"] = {"meta": self.dna_meta, "npz": self.dna_npz}
-        if self.protein_meta or self.protein_npz:
-            data["protein"] = {
-                "meta": self.protein_meta,
-                "npz": self.protein_npz,
-            }
+        if self.meta:
+            data["meta"] = self.meta
+        if self.dna_npz:
+            data["dna_npz"] = self.dna_npz
+        if self.protein_npz:
+            data["protein_npz"] = self.protein_npz
         if self.extras:
             data["extras"] = self.extras
         return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SplitArtifact":
-        dna = data.get("dna", {})
-        prot = data.get("protein", {})
         extras = data.get("extras", {})
+        if extras is None or not isinstance(extras, dict):
+            extras = {}
+        meta_path = data.get("meta")
+        dna_npz = data.get("dna_npz")
+        protein_npz = data.get("protein_npz")
         return cls(
-            dna_meta=dna.get("meta"),
-            dna_npz=dna.get("npz"),
-            protein_meta=prot.get("meta"),
-            protein_npz=prot.get("npz"),
-            extras=dict(extras) if isinstance(extras, dict) else {},
+            meta=str(meta_path) if meta_path else None,
+            dna_npz=str(dna_npz) if dna_npz else None,
+            protein_npz=str(protein_npz) if protein_npz else None,
+            extras=dict(extras),
         )
 
 
@@ -82,15 +82,16 @@ class PipelineManifest:
             for name, block in data.get("splits", {}).items()
         }
         extras = data.get("extras", {})
-        if not go_npz and isinstance(extras, dict):
-            go_npz = (
-                extras.get("legacy", {})
-                .get("go", {})
-                .get("npz")
-            )
+        if extras is None or not isinstance(extras, dict):
+            extras = {}
         created_at = data.get("created_at") or datetime.utcnow().isoformat()
         if not go_npz:
             raise ValueError(f"Manifest {p} missing GO embedding reference")
+        for split_name, artifact in splits_dict.items():
+            if not artifact.protein_npz:
+                raise ValueError(
+                    f"Manifest split '{split_name}' missing protein_npz entry"
+                )
         return cls(
             go_npz=str(go_npz),
             splits=splits_dict,

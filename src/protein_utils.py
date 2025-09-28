@@ -448,7 +448,7 @@ def process_and_cache_protein(
     if len(pairs) == 0:
         raise RuntimeError("No WT/MT sequences found in VEP combined file.")
     kept = pairs.reset_index(drop=True).copy()
-    kept["emb_row"] = np.arange(len(kept), dtype=np.int32)
+    kept["protein_embedding_idx"] = np.arange(len(kept), dtype=np.int32)
 
     # Short-circuit if cache matches (keeps re-runs instant)
     need_embed = True
