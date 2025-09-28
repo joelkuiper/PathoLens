@@ -41,7 +41,7 @@ force_vep = false
 
 [GO]
 npz = "data/processed/go_n2v_genes.npz"
-normalize = true
+normalize = false
 uppercase_keys = true
 
 [LLM]

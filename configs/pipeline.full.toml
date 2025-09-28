@@ -41,7 +41,7 @@ force_vep = false
 
 [GO]
 npz = "data/processed/go_n2v_genes.npz"
-normalize = true
+normalize = false
 uppercase_keys = true
 
 [LLM]
@@ -50,7 +50,7 @@ out_dir = "artifacts/full/qwen3"
 model_id = "Qwen/Qwen3-4B-Instruct-2507"
 epochs = 1
 max_len = 256
-per_device_bs = 16
+per_device_bs = 24
 grad_accum = 8
 lr = 0.0003
 seed = 42
