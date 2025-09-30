@@ -377,8 +377,6 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
     D_prot = int(getattr(ds_tr, "D_prot", 0) or 0)
     D_cond = D_eff + D_go + D_prot
     print(f"[SMOKE] D_eff={D_eff}  D_go={D_go}  D_prot={D_prot}  → D_cond={D_cond}")
-    cond_dtype = np.dtype(getattr(ds_tr, "cond_dtype", np.dtype("float32")))
-    print(f"[SMOKE] Conditioning dtype: {cond_dtype.name}")
 
     # --- Special tokens must be single ids ---
     def _single_id(token: str) -> int:
@@ -475,11 +473,7 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
         f"projector_in={projector.d_in}"
     )
 
-    collator = make_collator(
-        tok,
-        max_len=cfg.max_len,
-        cond_dtype=getattr(train_ds, "cond_dtype", None),
-    )
+    collator = make_collator(tok, max_len=cfg.max_len)
     smoke_checks(seq_ds, tok, cfg)
 
     sampler = _make_balanced_sampler(train_ds) if cfg.balanced_sampling else None

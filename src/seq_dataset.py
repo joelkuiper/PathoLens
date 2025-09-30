@@ -1,80 +1,34 @@
 from __future__ import annotations
 
-from collections import OrderedDict
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Mapping, Optional, Tuple
 
+from pathlib import Path
+
+import h5py
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from src.dna_utils import DNAConditioningStreamer, encode_dna_conditioning
 from src.go.gene_go_embeddings import GeneGOEmbeddings
-from src.protein_utils import (
-    ProteinConditioningStreamer,
-    encode_protein_conditioning,
-)
-
-
-def _normalize_device(device: Optional[Union[str, torch.device]]) -> str:
-    if device is None:
-        return ""
-    if isinstance(device, torch.device):
-        return device.type
-    dev = str(device).strip()
-    return "" if dev.lower() == "auto" else dev
-
-
-def _select_conditioning_dtype(
-    requested: Optional[Union[str, np.dtype]],
-    device: Optional[Union[str, torch.device]],
-) -> np.dtype:
-    if requested is not None and str(requested).lower() not in {"auto", "default"}:
-        return np.dtype(requested)
-
-    normalized = _normalize_device(device)
-    specified = [normalized] if normalized else []
-
-    def _is_accel(dev: str) -> bool:
-        return dev.startswith("cuda") or dev.startswith("mps")
-
-    if any(_is_accel(dev) for dev in specified):
-        return np.dtype("float16")
-    if specified and all(dev == "cpu" for dev in specified):
-        return np.dtype("float32")
-    if torch.cuda.is_available():
-        return np.dtype("float16")
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return np.dtype("float16")
-    return np.dtype("float32")
 
 
 class SequenceTowerDataset(Dataset):
-    """Dataset that streams DNA/GO/Protein conditioning features."""
+    """Dataset that concatenates DNA, GO, and protein embeddings."""
 
     def __init__(
         self,
         *,
         meta_df: Optional[pd.DataFrame] = None,
         meta_feather: Optional[str] = None,
+        dna_h5: str,
         go_npz: Optional[str] = None,
         make_label: bool = True,
         label_col: str = "_y",
+        protein_h5: str,
         go_normalize: bool = True,
         go_uppercase: bool = True,
         schema: Optional[Mapping[str, str]] = None,
-        dna_model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g",
-        dna_model_revision: Optional[str] = None,
-        dna_max_length: int = 384,
-        dna_batch_size: int = 16,
-        dna_cache_size: int = 64,
-        protein_model_id: str = "facebook/esm2_t12_35M_UR50D",
-        protein_model_revision: Optional[str] = None,
-        protein_max_length: int = 2048,
-        protein_batch_size: int = 8,
-        protein_cache_size: int = 32,
-        device: Optional[Union[str, torch.device]] = None,
-        conditioning_dtype: Optional[Union[str, np.dtype]] = "auto",
     ) -> None:
         if meta_df is None:
             if not meta_feather:
@@ -109,10 +63,7 @@ class SequenceTowerDataset(Dataset):
         dna_idx_series = self.meta["dna_embedding_idx"]
         if dna_idx_series.isna().any():
             raise ValueError("dna_embedding_idx column contains missing values")
-        self._dna_idx = dna_idx_series.astype("int64").to_numpy()
-
-        protein_idx_series = self.meta["protein_embedding_idx"].fillna(-1)
-        self._prot_idx = protein_idx_series.astype("int64").to_numpy()
+        self._dna_idx = dna_idx_series.to_numpy(dtype=np.int64)
 
         # Pre-compute uppercase gene names once for GO lookups
         gene_series = self.meta.get(
@@ -124,40 +75,79 @@ class SequenceTowerDataset(Dataset):
         self._gene_upper = gene_series.str.upper().tolist()
         self._gene_lookup = list(self._gene_upper)
 
-        self.cond_dtype = _select_conditioning_dtype(conditioning_dtype, device)
-        self._cond_dtype_str = str(self.cond_dtype)
-
         # ---- DNA embeddings ----
-        dna_stream = encode_dna_conditioning(
-            self.meta,
-            model_id=dna_model_id,
-            revision=dna_model_revision,
-            max_length=dna_max_length,
-            batch_size=dna_batch_size,
-            device=device,
-        )
-        if not isinstance(dna_stream, DNAConditioningStreamer):
-            raise TypeError(
-                "encode_dna_conditioning must return DNAConditioningStreamer for streaming"
+        self._dna_archive_handle = None
+        dna_path = Path(dna_h5)
+        if dna_path.suffix.lower() not in {".h5", ".hdf5"}:
+            raise ValueError(
+                f"DNA archive must be an HDF5 file (.h5/.hdf5); got '{dna_path}'"
             )
-        self._dna_stream = dna_stream
-        self.dna_seq_len = int(getattr(dna_stream, "seq_len", 0))
-        self.dna_embed_dim = int(getattr(dna_stream, "embed_dim", 0))
-        self._dna_cache: "OrderedDict[int, Dict[str, np.ndarray]]" = OrderedDict()
-        self._dna_cache_size = max(0, int(dna_cache_size))
+        try:
+            dna_archive = h5py.File(dna_path, "r")
+        except Exception as exc:  # pragma: no cover - file errors are environmental
+            raise RuntimeError(
+                f"Failed to open DNA archive '{dna_h5}': {exc}"
+            ) from exc
+        self._dna_archive_handle = dna_archive
+        dna_required = {
+            "dna_ref_tokens",
+            "dna_alt_tokens",
+            "dna_ref_mask",
+            "dna_alt_mask",
+            "dna_edit_mask",
+            "dna_gap_mask",
+            "dna_pos",
+            "dna_splice_mask",
+        }
+        dna_keys = set(dna_archive.keys())
+        missing = dna_required - dna_keys
+        if missing:
+            raise KeyError(
+                f"DNA archive missing keys: {sorted(missing)} | found={sorted(dna_keys)}"
+            )
+        seq_len_attr = dna_archive.attrs.get("seq_len")
+        if seq_len_attr is None:
+            raise KeyError("DNA archive missing 'seq_len' attribute")
+        dna_seq_len_meta = int(seq_len_attr)
+        self._dna_ref_tokens = dna_archive["dna_ref_tokens"]
+        self._dna_alt_tokens = dna_archive["dna_alt_tokens"]
+        self._dna_ref_mask = dna_archive["dna_ref_mask"]
+        self._dna_alt_mask = dna_archive["dna_alt_mask"]
+        self._dna_edit_mask = dna_archive["dna_edit_mask"]
+        self._dna_gap_mask = dna_archive["dna_gap_mask"]
+        self._dna_pos = dna_archive["dna_pos"]
+        self._dna_splice_mask = dna_archive["dna_splice_mask"]
+
+        self.dna_seq_len = int(self._dna_ref_tokens.shape[1])
+        if self.dna_seq_len != dna_seq_len_meta:
+            raise ValueError(
+                "DNA archive seq_len mismatch: "
+                f"stored={dna_seq_len_meta} actual={self.dna_seq_len}"
+            )
+        self.dna_embed_dim = int(self._dna_ref_tokens.shape[2])
+        N_full = int(self._dna_ref_tokens.shape[0])
+        self.D_eff = 0
+        self.dna_dim = 0
+        dna_min = int(self._dna_idx.min(initial=0))
+        dna_max = int(self._dna_idx.max(initial=-1))
+        if dna_min < 0 or dna_max >= N_full:
+            raise RuntimeError(
+                "dna_embedding_idx out of range "
+                f"(min={dna_min}, max={dna_max}, N={N_full})"
+            )
 
         # ---- GO embeddings ----
         self.go = None
         self.D_go = 0
         self.go_dim = 0
-        self._go_block: Optional[np.ndarray] = None
+        self._go_vectors: Optional[np.ndarray] = None
         self.go_hit_rate = 0.0
         if go_npz:
             try:
                 go_embed = GeneGOEmbeddings(
                     go_npz, normalize=go_normalize, uppercase_keys=go_uppercase
                 )
-            except Exception as exc:  # pragma: no cover - defensive guard
+            except Exception as exc:
                 raise RuntimeError(
                     f"Failed to load GO embeddings from '{go_npz}': {exc}"
                 ) from exc
@@ -172,25 +162,22 @@ class SequenceTowerDataset(Dataset):
                     else self._gene_values
                 )
                 self._gene_lookup = list(gene_lookup)
-                go_batch = go_embed.batch(self._gene_lookup)
-                self._go_block = np.asarray(go_batch, dtype=self.cond_dtype)
+                self._go_vectors = np.asarray(
+                    go_embed.batch(self._gene_lookup), dtype="float32"
+                )
                 go_hits = sum(1 for g in self._gene_lookup if go_embed.has(g))
                 total_genes = len(self._gene_lookup)
                 self.go_hit_rate = go_hits / max(1, total_genes)
-            else:
-                self._go_block = None
-        else:
-            self._go_block = None
 
         # ---- labels ----
         self.make_label = bool(make_label)
         self.label_col = str(label_col)
+        if self.make_label and self.label_col not in self.meta.columns:
+            raise KeyError(f"Label column '{self.label_col}' not found in meta.")
         self._labels = None
         if self.make_label:
-            if self.label_col not in self.meta.columns:
-                raise KeyError(f"Label column '{self.label_col}' not found in meta.")
             label_series = pd.to_numeric(
-                self.meta[self.label_col], errors="raise"
+                self.meta[self.label_col], errors="raise",
             )
             if label_series.isna().any():
                 raise ValueError(
@@ -199,35 +186,82 @@ class SequenceTowerDataset(Dataset):
             self._labels = label_series.astype("int64").to_numpy()
 
         # ---- protein embeddings ----
-        protein_stream = encode_protein_conditioning(
-            self.meta,
-            model_id=protein_model_id,
-            revision=protein_model_revision,
-            max_length=protein_max_length,
-            batch_size=protein_batch_size,
-            device=device,
-        )
-        if not isinstance(protein_stream, ProteinConditioningStreamer):
-            raise TypeError(
-                "encode_protein_conditioning must return ProteinConditioningStreamer"
-            )
-        self._protein_stream = protein_stream
-        self.prot_seq_len = int(getattr(protein_stream, "seq_len", 0))
-        self.prot_embed_dim = int(getattr(protein_stream, "embed_dim", 0))
-        self._prot_cache: "OrderedDict[int, Dict[str, np.ndarray]]" = OrderedDict()
-        self._prot_cache_size = max(0, int(protein_cache_size))
+        protein_idx_series = self.meta["protein_embedding_idx"]
+        if protein_idx_series.isna().any():
+            raise ValueError("protein_embedding_idx column contains missing values")
 
-        self.D_eff = 0
-        self.dna_dim = 0
+        self._prot_archive_handle = None
+        prot_path = Path(protein_h5)
+        if prot_path.suffix.lower() not in {".h5", ".hdf5"}:
+            raise ValueError(
+                f"Protein archive must be an HDF5 file (.h5/.hdf5); got '{prot_path}'"
+            )
+        try:
+            prot_archive = h5py.File(protein_h5, "r")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to open protein archive '{protein_h5}': {exc}"
+            ) from exc
+        self._prot_archive_handle = prot_archive
+        prot_required = {
+            "prot_wt_tokens",
+            "prot_mt_tokens",
+            "prot_wt_mask",
+            "prot_mt_mask",
+            "prot_edit_mask",
+            "prot_gap_mask",
+            "prot_pos",
+            "prot_frameshift_mask",
+        }
+        prot_keys = set(prot_archive.keys())
+        missing_prot = prot_required - prot_keys
+        if missing_prot:
+            raise KeyError(
+                f"Protein archive missing keys: {sorted(missing_prot)} | found={sorted(prot_keys)}"
+            )
+        prot_seq_attr = prot_archive.attrs.get("seq_len")
+        if prot_seq_attr is None:
+            raise KeyError("Protein archive missing 'seq_len' attribute")
+        prot_seq_len_meta = int(prot_seq_attr)
+        self._prot_wt_tokens = prot_archive["prot_wt_tokens"]
+        self._prot_mt_tokens = prot_archive["prot_mt_tokens"]
+        self._prot_wt_mask = prot_archive["prot_wt_mask"]
+        self._prot_mt_mask = prot_archive["prot_mt_mask"]
+        self._prot_edit_mask = prot_archive["prot_edit_mask"]
+        self._prot_gap_mask = prot_archive["prot_gap_mask"]
+        self._prot_pos = prot_archive["prot_pos"]
+        self._prot_frameshift_mask = prot_archive["prot_frameshift_mask"]
+
+        self.prot_seq_len = int(self._prot_wt_tokens.shape[1])
+        if self.prot_seq_len != prot_seq_len_meta:
+            raise ValueError(
+                "Protein archive seq_len mismatch: "
+                f"stored={prot_seq_len_meta} actual={self.prot_seq_len}"
+            )
+        self.prot_embed_dim = int(self._prot_wt_tokens.shape[2])
         self.D_prot = 0
         self.protein_dim = 0
-
-        self._go_slice: Optional[slice] = None
-        self._dna_block_slice: Optional[slice] = None
-        self._prot_block_slice: Optional[slice] = None
+        self._prot_idx = protein_idx_series.to_numpy(dtype=np.int64)
+        if (self._prot_idx < -1).any():
+            raise RuntimeError(
+                "protein_embedding_idx must be -1 or non-negative integers"
+            )
+        prot_rows = int(self._prot_wt_tokens.shape[0])
+        if prot_rows == 0 and (self._prot_idx >= 0).any():
+            raise RuntimeError(
+                "protein_embedding_idx refers to embeddings but protein tokens array is empty"
+            )
+        prot_max = int(self._prot_idx.max(initial=-1))
+        if prot_max >= prot_rows:
+            raise RuntimeError(
+                "protein_embedding_idx out of range "
+                f"(max={prot_max}, N={prot_rows})"
+            )
+        covered = int((self._prot_idx >= 0).sum())
+        self.protein_coverage = covered / max(1, len(self.meta))
 
         # Build global slices for conditioning vector layout
-        self.cond_slices: dict[str, Optional[dict[str, slice]]] = {}
+        self.cond_slices: dict[str, Optional[dict[str, slice] | slice]] = {}
         offset = 0
 
         dna_block_start = offset
@@ -241,22 +275,16 @@ class SequenceTowerDataset(Dataset):
             dna_slices["alt_tokens"] = slice(offset, offset + L * E)
             offset += L * E
             for key in ("ref_mask", "alt_mask", "edit_mask", "gap_mask", "splice_mask", "pos"):
-                length = L if key != "pos" else L
-                dna_slices[key] = slice(offset, offset + length)
-                offset += length
+                dna_slices[key] = slice(offset, offset + L)
+                offset += L
         dna_block_stop = offset
         self.cond_slices["dna"] = dna_slices
         self.D_eff = dna_block_stop - dna_block_start
         self.dna_dim = self.D_eff
 
-        self._dna_block_slice = (
-            slice(dna_block_start, dna_block_stop) if self.D_eff > 0 else None
-        )
-
         go_slice = slice(offset, offset + self.D_go)
         self.cond_slices["go"] = go_slice
         offset = go_slice.stop
-        self._go_slice = go_slice if self.D_go > 0 else None
 
         prot_block_start = offset
         prot_slices: Optional[dict[str, slice]] = None
@@ -276,10 +304,6 @@ class SequenceTowerDataset(Dataset):
         self.D_prot = prot_block_stop - prot_block_start
         self.protein_dim = self.D_prot
         self.total_dim = offset
-
-        self._prot_block_slice = (
-            slice(prot_block_start, prot_block_stop) if self.D_prot > 0 else None
-        )
 
         dna_extra = []
         if dna_slices and "splice_mask" in dna_slices:
@@ -308,116 +332,74 @@ class SequenceTowerDataset(Dataset):
             },
             "go": {"slice": go_slice if self.D_go > 0 else None, "dim": self.D_go},
             "total_dim": self.total_dim,
-            "dtype": self._cond_dtype_str,
         }
-
-        # Protein coverage statistic (fraction of rows with embeddings)
-        covered = int((self._prot_idx >= 0).sum())
-        self.protein_coverage = covered / max(1, len(self.meta))
 
     # -----------------
     # Dataset protocol
     # -----------------
-
-    @staticmethod
-    def _fill_feature_block(
-        target: np.ndarray,
-        slices: Optional[Mapping[str, slice]],
-        features: Optional[Mapping[str, Any]],
-        dtype: np.dtype,
-    ) -> None:
-        if not slices or not features:
-            return
-        for key, sl in slices.items():
-            if sl is None:
-                continue
-            value = features.get(key)
-            if value is None:
-                continue
-            start = 0 if sl.start is None else int(sl.start)
-            stop = start if sl.stop is None else int(sl.stop)
-            if stop <= start:
-                continue
-            arr = np.asarray(value, dtype=dtype).reshape(-1)
-            needed = stop - start
-            if arr.size < needed:
-                if arr.size == 0:
-                    continue
-                padded = np.zeros(needed, dtype=dtype)
-                padded[: arr.size] = arr
-                arr = padded
-            elif arr.size > needed:
-                arr = arr[:needed]
-            target[start:stop] = arr
-
-    def _get_cached_features(
-        self,
-        idx: int,
-        *,
-        cache: "OrderedDict[int, Dict[str, np.ndarray]]",
-        cache_size: int,
-        streamer,
-    ) -> Optional[Dict[str, np.ndarray]]:
-        if idx < 0 or streamer is None:
-            return None
-        if idx in cache:
-            value = cache.pop(idx)
-            cache[idx] = value
-            return value
-        encoded = streamer.encode([idx]) if streamer else {}
-        feat = encoded.get(idx)
-        if feat is None:
-            return None
-        if cache_size > 0:
-            cache[idx] = feat
-            while len(cache) > cache_size:
-                cache.popitem(last=False)
-        return feat
-
-    def _fetch_dna_features(self, idx: int) -> Optional[Dict[str, np.ndarray]]:
-        return self._get_cached_features(
-            idx,
-            cache=self._dna_cache,
-            cache_size=self._dna_cache_size,
-            streamer=self._dna_stream,
-        )
-
-    def _fetch_protein_features(self, idx: int) -> Optional[Dict[str, np.ndarray]]:
-        return self._get_cached_features(
-            idx,
-            cache=self._prot_cache,
-            cache_size=self._prot_cache_size,
-            streamer=self._protein_stream,
-        )
-
     def __len__(self) -> int:
         return len(self.meta)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        x_np = np.zeros(self.total_dim, dtype=self.cond_dtype)
+        x_np = np.zeros(self.total_dim, dtype="float32")
 
-        if self._dna_block_slice is not None:
+        dna_slice = self.cond_slices.get("dna")
+        if dna_slice is not None:
             dna_idx = int(self._dna_idx[idx])
-            feats = self._fetch_dna_features(dna_idx)
-            self._fill_feature_block(
-                x_np,
-                self.cond_slices.get("dna"),
-                feats,
-                self.cond_dtype,
+            x_np[dna_slice["ref_tokens"]] = self._dna_ref_tokens[dna_idx].astype(
+                "float32"
+            ).reshape(-1)
+            x_np[dna_slice["alt_tokens"]] = self._dna_alt_tokens[dna_idx].astype(
+                "float32"
+            ).reshape(-1)
+            x_np[dna_slice["ref_mask"]] = self._dna_ref_mask[dna_idx].astype(
+                "float32"
             )
+            x_np[dna_slice["alt_mask"]] = self._dna_alt_mask[dna_idx].astype(
+                "float32"
+            )
+            x_np[dna_slice["edit_mask"]] = self._dna_edit_mask[dna_idx].astype(
+                "float32"
+            )
+            x_np[dna_slice["gap_mask"]] = self._dna_gap_mask[dna_idx].astype(
+                "float32"
+            )
+            x_np[dna_slice["splice_mask"]] = self._dna_splice_mask[dna_idx].astype(
+                "float32"
+            )
+            x_np[dna_slice["pos"]] = self._dna_pos[dna_idx].astype("float32").reshape(-1)
 
-        if self._go_slice is not None and self._go_block is not None:
-            x_np[self._go_slice] = self._go_block[idx]
+        go_slice = self.cond_slices.get("go")
+        if go_slice is not None and self.D_go > 0:
+            if self._go_vectors is not None:
+                x_np[go_slice] = self._go_vectors[idx].astype("float32")
 
-        if self._prot_block_slice is not None:
+        prot_slice = self.cond_slices.get("protein")
+        if prot_slice is not None and self.D_prot > 0:
             prot_idx = int(self._prot_idx[idx])
-            feats = self._fetch_protein_features(prot_idx)
-            self._fill_feature_block(
-                x_np,
-                self.cond_slices.get("protein"),
-                feats,
-                self.cond_dtype,
-            )
+            if prot_idx >= 0:
+                x_np[prot_slice["wt_tokens"]] = self._prot_wt_tokens[prot_idx].astype(
+                    "float32"
+                ).reshape(-1)
+                x_np[prot_slice["mt_tokens"]] = self._prot_mt_tokens[prot_idx].astype(
+                    "float32"
+                ).reshape(-1)
+                x_np[prot_slice["wt_mask"]] = self._prot_wt_mask[prot_idx].astype(
+                    "float32"
+                )
+                x_np[prot_slice["mt_mask"]] = self._prot_mt_mask[prot_idx].astype(
+                    "float32"
+                )
+                x_np[prot_slice["edit_mask"]] = self._prot_edit_mask[prot_idx].astype(
+                    "float32"
+                )
+                x_np[prot_slice["gap_mask"]] = self._prot_gap_mask[prot_idx].astype(
+                    "float32"
+                )
+                x_np[prot_slice["frameshift_mask"]] = self._prot_frameshift_mask[
+                    prot_idx
+                ].astype("float32")
+                x_np[prot_slice["pos"]] = self._prot_pos[prot_idx].astype("float32").reshape(-1)
 
         x = torch.from_numpy(x_np)
 
@@ -430,13 +412,15 @@ class SequenceTowerDataset(Dataset):
     # -----------------
     # Resource handling
     # -----------------
-    def close(self) -> None:  # pragma: no cover - retained for API compatibility
-        try:
-            self._dna_cache.clear()
-            self._prot_cache.clear()
-        except Exception:
-            pass
-        return None
+    def close(self) -> None:
+        for attr in ("_dna_archive_handle", "_prot_archive_handle"):
+            handle = getattr(self, attr, None)
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def __del__(self):  # pragma: no cover - defensive cleanup
         try:

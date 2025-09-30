@@ -10,7 +10,6 @@ from .config import (
     GOConfig,
     LLMRunConfig,
     load_pipeline_config,
-    resolve_device,
 )
 from .datasets import load_manifest_datasets
 from .manifest import PipelineManifest, SplitArtifact
@@ -25,7 +24,6 @@ __all__ = [
     "GOConfig",
     "LLMRunConfig",
     "load_pipeline_config",
-    "resolve_device",
     "PipelineManifest",
     "SplitArtifact",
     "load_manifest_datasets",
