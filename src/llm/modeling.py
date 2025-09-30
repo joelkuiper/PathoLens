@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from .config import COND_START_TOKEN, COND_END_TOKEN
+from .sequence_encoder import SequenceCNNEncoder, SequenceInputs
 
 
 def _ensure_special_tokens(tokenizer: AutoTokenizer) -> int:
@@ -30,73 +31,308 @@ def _ensure_special_tokens(tokenizer: AutoTokenizer) -> int:
     return added
 
 
-class ViewTokens(nn.Module):
-    def __init__(self, k: int, d_out: int):
-        super().__init__()
-        self.k, self.d_out = k, d_out
-
-    def forward(self, y: torch.Tensor) -> torch.Tensor:
-        # y: (B, k*d_out) -> (B, k, d_out)
-        B = y.size(0)
-        return y.view(B, self.k, self.d_out)
-
-
 class CondProjector(nn.Module):
-    """
-    (B, d_in) -> (B, k, d_out) virtual tokens + (B, n_classes) aux logits
-    Minimal head: LN -> Linear -> GELU -> Dropout -> Linear, then reshape.
-    """
+    """Map cached sequence embeddings into virtual tokens for the LLM."""
 
     CONFIG_NAME = "config.json"
     WEIGHTS_NAME = "pytorch_model.bin"
 
     def __init__(
         self,
-        d_in: int,
+        spec: Dict[str, Any],
         d_out: int,
         k: int = 8,
         n_classes: int = 2,
+        conv_dim: int = 256,
+        conv_layers: int = 3,
         p_drop: float = 0.10,
+        go_tokens: int = 1,
     ):
         super().__init__()
-        self.d_in = int(d_in)
+        self.spec = dict(spec)
+        self.d_in = int(spec.get("total_dim", 0))
         self.d_out = int(d_out)
-        self.k = int(k)
+        self.k_requested = int(k)
+        self.conv_dim = int(conv_dim)
+        self.conv_layers = int(conv_layers)
         self.n_classes = int(n_classes)
         self.p_drop = float(p_drop)
 
-        # (B, d_in) -> (B, k*d_out)
-        self.backbone = nn.Sequential(
-            nn.Identity(),
-            nn.Linear(self.d_in, self.d_out * self.k),
-            nn.GELU(),
-            nn.Dropout(self.p_drop),
-            nn.Linear(self.d_out * self.k, self.d_out * self.k),
-        )
+        if self.d_in <= 0:
+            raise ValueError("CondProjector requires positive input dimension")
 
-        # reshape to tokens
-        self.view = ViewTokens(self.k, self.d_out)
+        self._go_tokens_requested = int(go_tokens)
+        self.k_go = 0
+        self.k_dna = 0
+        self.k_prot = 0
+        self._assign_tokens(self.k_requested, self._go_tokens_requested)
 
-        # auxiliary classification head on the flattened block
-        self.aux_head = nn.Linear(self.d_out * self.k, self.n_classes)
+        dna_spec = self.spec.get("dna", {})
+        prot_spec = self.spec.get("protein", {})
+
+        self.dna_encoder: Optional[SequenceCNNEncoder]
+        if dna_spec.get("slices") is not None and self.k_dna > 0:
+            extra = dna_spec.get("extra_masks", []) or []
+            scalar = 3 + len(extra)  # pos + edit + gap + extras
+            self.dna_encoder = SequenceCNNEncoder(
+                embed_dim=int(dna_spec.get("embed_dim", 0)),
+                conv_dim=self.conv_dim,
+                conv_layers=self.conv_layers,
+                k_tokens=self.k_dna,
+                out_dim=self.d_out,
+                scalar_features=scalar,
+            )
+        else:
+            self.dna_encoder = None
+
+        if prot_spec.get("slices") is not None and self.k_prot > 0:
+            extra = prot_spec.get("extra_masks", []) or []
+            scalar = 3 + len(extra)  # pos + edit + gap + extras
+            self.protein_encoder = SequenceCNNEncoder(
+                embed_dim=int(prot_spec.get("embed_dim", 0)),
+                conv_dim=self.conv_dim,
+                conv_layers=self.conv_layers,
+                k_tokens=self.k_prot,
+                out_dim=self.d_out,
+                scalar_features=scalar,
+            )
+        else:
+            self.protein_encoder = None
+
+        go_dim = int(self.spec.get("go", {}).get("dim", 0) or 0)
+        self.go_proj: Optional[nn.Module]
+        if go_dim > 0 and self.k_go > 0:
+            self.go_proj = nn.Sequential(
+                nn.LayerNorm(go_dim),
+                nn.Linear(go_dim, self.d_out * self.k_go),
+                nn.GELU(),
+                nn.Linear(self.d_out * self.k_go, self.d_out * self.k_go),
+            )
+        else:
+            self.go_proj = None
+
+        self.k = self.k_dna + self.k_prot + self.k_go
+        if self.k <= 0:
+            raise ValueError("CondProjector must emit at least one virtual token")
+
+        self.dropout = nn.Dropout(self.p_drop)
+        self.aux_head = nn.Linear(self.d_out, self.n_classes)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # x: (B, d_in)
-        y = self.backbone(x)  # (B, k*d_out)
-        tokens = self.view(y)  # (B, k, d_out)
-        aux_logits = self.aux_head(y)  # (B, n_classes)
-        return tokens, aux_logits
+        if x.dim() != 2 or x.size(-1) != self.d_in:
+            raise ValueError(
+                f"CondProjector expected input shape (B, {self.d_in}), got {tuple(x.shape)}"
+            )
+
+        compute_dtype = self.aux_head.weight.dtype
+        device = next(self.parameters()).device
+        x = x.to(device=device, dtype=compute_dtype)
+
+        tokens: list[torch.Tensor] = []
+
+        if self.dna_encoder is not None:
+            dna_inputs = self._build_sequence_inputs(x, self.spec["dna"], modality="dna")
+            dna_tokens = self.dna_encoder(dna_inputs)
+            tokens.append(dna_tokens)
+
+        if self.protein_encoder is not None:
+            prot_inputs = self._build_sequence_inputs(
+                x, self.spec["protein"], modality="protein"
+            )
+            prot_tokens = self.protein_encoder(prot_inputs)
+            tokens.append(prot_tokens)
+
+        if self.go_proj is not None and self.k_go > 0:
+            go_slice = self.spec["go"].get("slice")
+            if go_slice is None:
+                raise RuntimeError("GO projection requested but slice missing in spec")
+            go_vec = x[:, go_slice]
+            go_tokens = self.go_proj(go_vec).view(x.size(0), self.k_go, self.d_out)
+            tokens.append(go_tokens)
+
+        if not tokens:
+            raise RuntimeError("No conditioning modalities available for CondProjector")
+
+        out_tokens = torch.cat(tokens, dim=1)
+        out_tokens = self.dropout(out_tokens)
+        out_tokens = out_tokens.to(self.aux_head.weight.dtype)
+
+        pooled = out_tokens.mean(dim=1)
+        aux_logits = self.aux_head(pooled)
+        return out_tokens, aux_logits
+
+    def _build_sequence_inputs(
+        self, cond_vec: torch.Tensor, spec_section: Dict[str, Any], *, modality: str
+    ) -> SequenceInputs:
+        slices = spec_section.get("slices")
+        if slices is None:
+            raise RuntimeError(f"Spec for {modality} missing slices")
+        B = cond_vec.size(0)
+        L = int(spec_section.get("seq_len", 0))
+        D = int(spec_section.get("embed_dim", 0))
+        if L == 0 or D == 0:
+            raise RuntimeError(f"Invalid sequence dimensions for {modality}")
+
+        if modality == "protein":
+            wt_key, mt_key = "wt_tokens", "mt_tokens"
+            mask_keys = ("wt_mask", "mt_mask")
+        else:
+            wt_key, mt_key = "ref_tokens", "alt_tokens"
+            mask_keys = ("ref_mask", "alt_mask")
+
+        wt = cond_vec[:, slices[wt_key]].view(B, L, D)
+        mt = cond_vec[:, slices[mt_key]].view(B, L, D)
+        mask_a = cond_vec[:, slices[mask_keys[0]]].view(B, L)
+        mask_b = cond_vec[:, slices[mask_keys[1]]].view(B, L)
+        mask = torch.clamp(mask_a + mask_b, 0.0, 1.0)
+        edit_mask = cond_vec[:, slices["edit_mask"]].view(B, L, 1)
+        gap_mask = cond_vec[:, slices["gap_mask"]].view(B, L, 1)
+        pos_slice = slices.get("pos")
+        pos = (
+            cond_vec[:, pos_slice].view(B, L, 1)
+            if pos_slice is not None
+            else torch.zeros_like(edit_mask)
+        )
+        extra_masks: list[torch.Tensor] = []
+        for key in spec_section.get("extra_masks", []) or []:
+            sl = slices.get(key)
+            if sl is not None:
+                extra_masks.append(cond_vec[:, sl].view(B, L, 1))
+
+        return SequenceInputs(
+            wt=wt,
+            mt=mt,
+            mask=mask,
+            edit_mask=edit_mask,
+            gap_mask=gap_mask,
+            extra_masks=extra_masks if extra_masks else None,
+            pos=pos,
+        )
+
+    def _assign_tokens(self, k_total: int, go_tokens: int) -> None:
+        if k_total <= 0:
+            raise ValueError("Number of conditioning tokens must be positive")
+        go_dim = int(self.spec.get("go", {}).get("dim", 0) or 0)
+        has_go = go_dim > 0
+        self.k_go = min(int(go_tokens), k_total) if has_go else 0
+        remaining = k_total - self.k_go
+        has_dna = self.spec.get("dna", {}).get("slices") is not None
+        has_prot = self.spec.get("protein", {}).get("slices") is not None
+
+        self.k_dna = 0
+        self.k_prot = 0
+        if remaining > 0:
+            if has_dna and has_prot:
+                self.k_dna = max(1, remaining // 2)
+                self.k_prot = remaining - self.k_dna
+                if self.k_prot == 0:
+                    self.k_prot = 1
+                    self.k_dna = remaining - self.k_prot
+            elif has_dna:
+                self.k_dna = remaining
+            elif has_prot:
+                self.k_prot = remaining
+
+        if self.k_dna + self.k_prot + self.k_go < k_total:
+            leftover = k_total - (self.k_dna + self.k_prot + self.k_go)
+            if self.k_dna > 0:
+                self.k_dna += leftover
+            elif self.k_prot > 0:
+                self.k_prot += leftover
+            elif self.k_go > 0:
+                self.k_go += leftover
+
+    # ------------------------------------------------------------------
+    # Serialization helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _slice_to_tuple(slc: Optional[slice]) -> Optional[tuple[int, int]]:
+        if slc is None:
+            return None
+        return (int(slc.start), int(slc.stop))
+
+    @classmethod
+    def _serialise_spec(cls, spec: Dict[str, Any]) -> Dict[str, Any]:
+        def _map(section: Optional[Dict[str, slice]]) -> Optional[Dict[str, tuple[int, int]]]:
+            if section is None:
+                return None
+            return {k: cls._slice_to_tuple(v) for k, v in section.items()}
+
+        return {
+            "total_dim": int(spec.get("total_dim", 0)),
+            "dna": {
+                "seq_len": int(spec.get("dna", {}).get("seq_len", 0)),
+                "embed_dim": int(spec.get("dna", {}).get("embed_dim", 0)),
+                "slices": _map(spec.get("dna", {}).get("slices")),
+                "extra_masks": list(spec.get("dna", {}).get("extra_masks", []) or []),
+            },
+            "protein": {
+                "seq_len": int(spec.get("protein", {}).get("seq_len", 0)),
+                "embed_dim": int(spec.get("protein", {}).get("embed_dim", 0)),
+                "slices": _map(spec.get("protein", {}).get("slices")),
+                "extra_masks": list(spec.get("protein", {}).get("extra_masks", []) or []),
+            },
+            "go": {
+                "slice": cls._slice_to_tuple(spec.get("go", {}).get("slice")),
+                "dim": int(spec.get("go", {}).get("dim", 0)),
+            },
+        }
+
+    @staticmethod
+    def _tuple_to_slice(t: Optional[tuple[int, int]]) -> Optional[slice]:
+        if t is None:
+            return None
+        return slice(int(t[0]), int(t[1]))
+
+    @classmethod
+    def _deserialise_spec(cls, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        spec = {
+            "total_dim": int(cfg.get("total_dim", 0)),
+            "dna": {
+                "seq_len": int(cfg.get("dna", {}).get("seq_len", 0)),
+                "embed_dim": int(cfg.get("dna", {}).get("embed_dim", 0)),
+                "slices": None,
+                "extra_masks": list(cfg.get("dna", {}).get("extra_masks", []) or []),
+            },
+            "protein": {
+                "seq_len": int(cfg.get("protein", {}).get("seq_len", 0)),
+                "embed_dim": int(cfg.get("protein", {}).get("embed_dim", 0)),
+                "slices": None,
+                "extra_masks": list(cfg.get("protein", {}).get("extra_masks", []) or []),
+            },
+            "go": {
+                "slice": cls._tuple_to_slice(cfg.get("go", {}).get("slice")),
+                "dim": int(cfg.get("go", {}).get("dim", 0)),
+            },
+        }
+        dna_slices_cfg = cfg.get("dna", {}).get("slices")
+        if dna_slices_cfg is not None:
+            spec["dna"]["slices"] = {
+                k: cls._tuple_to_slice(tuple(v) if v is not None else None)
+                for k, v in dna_slices_cfg.items()
+            }
+        protein_slices_cfg = cfg.get("protein", {}).get("slices")
+        if protein_slices_cfg is not None:
+            spec["protein"]["slices"] = {
+                k: cls._tuple_to_slice(tuple(v) if v is not None else None)
+                for k, v in protein_slices_cfg.items()
+            }
+        return spec
 
     # ------------------------------------------------------------------
     # Serialization helpers
     # ------------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:
         return {
-            "d_in": self.d_in,
+            "spec": self._serialise_spec(self.spec),
             "d_out": self.d_out,
-            "k": self.k,
+            "k": self.k_requested,
             "n_classes": self.n_classes,
             "p_drop": self.p_drop,
+            "conv_dim": self.conv_dim,
+            "conv_layers": self.conv_layers,
+            "go_tokens": self._go_tokens_requested,
+            "d_in": self.d_in,
             "model_cls": self.__class__.__name__,
             "module": self.__class__.__module__,
         }
@@ -118,7 +354,10 @@ class CondProjector(nn.Module):
         cfg = dict(config)
         cfg.pop("model_cls", None)
         cfg.pop("module", None)
-        return cls(**cfg)
+        spec_cfg = cfg.pop("spec")
+        cfg.pop("d_in", None)
+        spec = cls._deserialise_spec(spec_cfg)
+        return cls(spec=spec, **cfg)
 
     @classmethod
     def from_pretrained(
@@ -152,7 +391,7 @@ class CondProjector(nn.Module):
         return projector
 
 
-def build_qwen_with_lora(cfg, D_cond: int):
+def build_qwen_with_lora(cfg, cond_spec: Dict[str, Any]):
     # Prefer bf16 compute if available; otherwise fallback to fp16 for speed/compat
     compute_dtype = torch.bfloat16
     try:
@@ -211,11 +450,19 @@ def build_qwen_with_lora(cfg, D_cond: int):
     base = get_peft_model(base, lora)
 
     hidden = base.config.hidden_size
-    n_cond_tokens = getattr(cfg, "n_cond_tokens", 8)  # default to 8 as requested
+    n_cond_tokens = getattr(cfg, "n_cond_tokens", 8)
+    go_tokens = getattr(cfg, "go_tokens", 1)
+    conv_dim = getattr(cfg, "conv_dim", 256)
+    conv_layers = getattr(cfg, "conv_layers", 3)
     base_param = next(base.parameters())
-    projector = CondProjector(D_cond, hidden, k=n_cond_tokens).to(
-        device=base_param.device, dtype=base_param.dtype
-    )
+    projector = CondProjector(
+        spec=cond_spec,
+        d_out=hidden,
+        k=n_cond_tokens,
+        go_tokens=go_tokens,
+        conv_dim=conv_dim,
+        conv_layers=conv_layers,
+    ).to(device=base_param.device, dtype=base_param.dtype)
     # Attach projector to the model so Trainer optimizes it
     base.add_module("cond_projector", projector)
     print("[DEBUG] Model ready. Hidden:", hidden, "Cond tokens:", n_cond_tokens)

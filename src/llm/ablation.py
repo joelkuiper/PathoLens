@@ -246,6 +246,40 @@ class _TransformedSplit:
         return getattr(self.base, name)
 
 
+def _block_bounds(entry) -> Optional[Tuple[int, int]]:
+    """Return the [start, stop) bounds for a conditioning block."""
+
+    if entry is None:
+        return None
+
+    if isinstance(entry, slice):
+        return (int(entry.start or 0), int(entry.stop or 0))
+
+    if isinstance(entry, dict):
+        if "slice" in entry and isinstance(entry["slice"], slice):
+            sl = entry["slice"]
+            return (int(sl.start or 0), int(sl.stop or 0))
+
+        if "slices" in entry and isinstance(entry["slices"], dict):
+            starts: List[int] = []
+            stops: List[int] = []
+            for sl in entry["slices"].values():
+                if isinstance(sl, slice):
+                    starts.append(int(sl.start or 0))
+                    stops.append(int(sl.stop or 0))
+            if starts and stops:
+                return (min(starts), max(stops))
+
+    return None
+
+
+def _range_len(bounds: Optional[Tuple[int, int]]) -> int:
+    if not bounds:
+        return 0
+    start, stop = bounds
+    return max(0, int(stop) - int(start))
+
+
 def _with_cond_identity(seq_ds: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _CondTransformCfg(mode="identity")
     return {k: _TransformedSplit(seq_ds[k], cfg) for k in ("train", "val", "test")}
@@ -385,9 +419,25 @@ def run_prompt_vs_cond_ablation(
     train_split = seq_ds.get("train")
     if train_split is None:
         raise ValueError("Sequence dataset missing 'train' split for ablation")
-    D_eff = int(train_split.D_eff)
-    D_go = int(getattr(train_split, "D_go", 0) or 0)
-    D_prot = int(train_split.D_prot)
+    cond_spec = getattr(train_split, "cond_spec", None)
+    if cond_spec:
+        dna_bounds = _block_bounds(cond_spec.get("dna"))
+        go_bounds = _block_bounds(cond_spec.get("go"))
+        prot_bounds = _block_bounds(cond_spec.get("protein"))
+        D_eff = _range_len(dna_bounds)
+        D_go = _range_len(go_bounds)
+        D_prot = _range_len(prot_bounds)
+        dna_range = dna_bounds if D_eff > 0 else None
+        go_range = go_bounds if D_go > 0 else None
+        prot_range = prot_bounds if D_prot > 0 else None
+    else:
+        D_eff = int(getattr(train_split, "D_eff", 0))
+        D_go = int(getattr(train_split, "D_go", 0) or 0)
+        D_prot = int(getattr(train_split, "D_prot", 0))
+        dna_range = (0, D_eff) if D_eff > 0 else None
+        go_range = (D_eff, D_eff + D_go) if D_go > 0 else None
+        prot_start = D_eff + D_go
+        prot_range = (prot_start, prot_start + D_prot) if D_prot > 0 else None
 
     # --- cond only (blank prompts) ---
     print("\n[ABL] cond only (prompts blanked)")
@@ -415,9 +465,9 @@ def run_prompt_vs_cond_ablation(
     results["cond+prompt"] = out
 
     # --- cond_zero_dna (zero only DNA features) ---
-    if D_eff > 0:
+    if dna_range is not None:
         print("\n[ABL] cond_zero_dna (conditioning: zero DNA block)")
-        view_zero_dna = _with_cond_zero_ranges(seq_ds, [(0, D_eff)])
+        view_zero_dna = _with_cond_zero_ranges(seq_ds, [dna_range])
         out = evaluate_split_batched(
             view_zero_dna,
             out_dir=out_dir,
@@ -428,8 +478,8 @@ def run_prompt_vs_cond_ablation(
         results["cond_zero_dna"] = out
 
     # --- cond_zero_go (zero only GO features) ---
-    if D_go > 0:
-        go_start, go_end = D_eff, D_eff + D_go
+    if go_range is not None:
+        go_start, go_end = go_range
         print("\n[ABL] cond_zero_go (conditioning: zero GO block)")
         view_zero_go = _with_cond_zero_ranges(seq_ds, [(go_start, go_end)])
         out = evaluate_split_batched(
@@ -442,12 +492,9 @@ def run_prompt_vs_cond_ablation(
         results["cond_zero_go"] = out
 
     # --- cond_zero_prot (zero only protein features) ---
-    prot_start = D_eff + D_go
-    if D_prot > 0:
+    if prot_range is not None:
         print("\n[ABL] cond_zero_prot (conditioning: zero protein block)")
-        view_zero_prot = _with_cond_zero_ranges(
-            seq_ds, [(prot_start, prot_start + D_prot)]
-        )
+        view_zero_prot = _with_cond_zero_ranges(seq_ds, [prot_range])
         out = evaluate_split_batched(
             view_zero_prot,
             out_dir=out_dir,

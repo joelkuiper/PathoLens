@@ -21,29 +21,53 @@ def row_to_example(meta_row) -> Tuple[str, str]:
 
 
 # ---------- Dataset ----------
-class CondTextDataset(Dataset):
+class CondDataset(Dataset):
     """
     Builds conditioning vectors from SequenceTowerDataset samples.
 
     Assumes each sample returns:
-        v, *_  where v packs  [ dna_eff | go_vec | prot_eff ]
+        v, *_  where v packs  [ dna_features | go_vec | protein_features ]
 
-    We *explicitly* slice to D_cond = D_eff + D_go + D_prot
-    so any future additions to v won't silently leak in.
+    The conditioning span is derived from the sequence dataset's ``cond_spec``
+    so the dataset always follows the canonical block layout.
     """
 
     def __init__(self, seq_ds, tokenizer=None):
         t0 = time.time()
         self.seq_ds = seq_ds
         self.meta = seq_ds.meta
-        # include GO and protein blocks alongside DNA features
-        D_eff = int(seq_ds.D_eff)
-        D_go = int(getattr(seq_ds, "D_go", 0) or 0)
-        D_prot = int(getattr(seq_ds, "D_prot", 0) or 0)
-        self.D_eff, self.D_go, self.D_prot = D_eff, D_go, D_prot
-        self.D_cond = D_eff + D_go + D_prot
+        spec = getattr(seq_ds, "cond_spec", None)
+        if spec is None:
+            raise AttributeError(
+                "Sequence dataset is missing 'cond_spec'; cannot derive conditioning layout."
+            )
+
+        self.cond_spec = spec
+
+        def _slice_len(value):
+            if value is None:
+                return 0
+            if isinstance(value, slice):
+                start = 0 if value.start is None else int(value.start)
+                stop = start if value.stop is None else int(value.stop)
+                return int(stop - start)
+            raise TypeError(f"Unexpected slice type in cond_spec: {type(value)!r}")
+
+        dna_info = spec.get("dna", {})
+        go_info = spec.get("go", {})
+        prot_info = spec.get("protein", {})
+
+        self.D_dna = _slice_len(dna_info.get("slice"))
+        self.D_go = int(go_info.get("dim") or _slice_len(go_info.get("slice")))
+        self.D_prot = _slice_len(prot_info.get("slice"))
+        self.D_cond = int(spec.get("total_dim", 0))
+        if self.D_cond <= 0:
+            # Fallback to explicit sum if total_dim missing or zero
+            self.D_cond = self.D_dna + self.D_go + self.D_prot
+
         print(
-            f"[DEBUG] CondTextDataset: D_eff={D_eff} D_go={D_go} D_prot={D_prot} "
+            "[DEBUG] CondDataset: "
+            f"D_dna={self.D_dna} D_go={self.D_go} D_prot={self.D_prot} "
             f"=> D_cond={self.D_cond} | Build time: {time.time() - t0:.2f}s"
         )
 
@@ -61,7 +85,7 @@ class CondTextDataset(Dataset):
         meta_row = self.meta.iloc[i]
         prompt, target = row_to_example(meta_row)
         if "_y" not in meta_row:
-            raise KeyError("CondTextDataset requires '_y' label in metadata.")
+            raise KeyError("CondDataset requires '_y' label in metadata.")
         y = int(meta_row.get("_y"))
 
         return {"cond_vec": cond, "prompt": prompt, "target": target, "_y": y}

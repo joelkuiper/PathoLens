@@ -10,18 +10,18 @@ from typing import Any, Dict, Optional
 @dataclass
 class SplitArtifact:
     meta: Optional[str] = None
-    dna_npz: Optional[str] = None
-    protein_npz: Optional[str] = None
+    dna_h5: Optional[str] = None
+    protein_h5: Optional[str] = None
     extras: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
         if self.meta:
             data["meta"] = self.meta
-        if self.dna_npz:
-            data["dna_npz"] = self.dna_npz
-        if self.protein_npz:
-            data["protein_npz"] = self.protein_npz
+        if self.dna_h5:
+            data["dna_h5"] = self.dna_h5
+        if self.protein_h5:
+            data["protein_h5"] = self.protein_h5
         if self.extras:
             data["extras"] = self.extras
         return data
@@ -32,12 +32,12 @@ class SplitArtifact:
         if extras is None or not isinstance(extras, dict):
             extras = {}
         meta_path = data.get("meta")
-        dna_npz = data.get("dna_npz")
-        protein_npz = data.get("protein_npz")
+        dna_path = data.get("dna_h5")
+        protein_path = data.get("protein_h5")
         return cls(
             meta=str(meta_path) if meta_path else None,
-            dna_npz=str(dna_npz) if dna_npz else None,
-            protein_npz=str(protein_npz) if protein_npz else None,
+            dna_h5=str(dna_path) if dna_path else None,
+            protein_h5=str(protein_path) if protein_path else None,
             extras=dict(extras),
         )
 
@@ -88,9 +88,9 @@ class PipelineManifest:
         if not go_npz:
             raise ValueError(f"Manifest {p} missing GO embedding reference")
         for split_name, artifact in splits_dict.items():
-            if not artifact.protein_npz:
+            if not artifact.protein_h5:
                 raise ValueError(
-                    f"Manifest split '{split_name}' missing protein_npz entry"
+                    f"Manifest split '{split_name}' missing protein_h5 entry"
                 )
         return cls(
             go_npz=str(go_npz),

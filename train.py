@@ -30,10 +30,10 @@ def _merge_artifacts(
         existing = combined[split]
         if part.meta:
             existing.meta = part.meta
-        if part.dna_npz:
-            existing.dna_npz = part.dna_npz
-        if part.protein_npz:
-            existing.protein_npz = part.protein_npz
+        if part.dna_h5:
+            existing.dna_h5 = part.dna_h5
+        if part.protein_h5:
+            existing.protein_h5 = part.protein_h5
         existing.extras.update(part.extras)
     return combined
 

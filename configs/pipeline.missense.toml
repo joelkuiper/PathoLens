@@ -15,18 +15,18 @@ artifacts = "artifacts/missense"
 
 [DNA]
 model_id = "InstaDeepAI/nucleotide-transformer-500m-1000g"
-window = 512
-max_length = 512
+window = 128
+max_length = 384
 batch_size = 16
-pool = "mean"
 force_windows = false
 force_embeddings = false
 
 [Protein]
 model_id = "facebook/esm2_t12_35M_UR50D"
 batch_size = 8
+# ``window`` is the target length (residues) for the centered protein slice
+window = 127
 max_length = 2048
-pool = "mean"
 vep_cache_dir = "~/vep_cache"
 vep_fasta_relpath = "homo_sapiens/115_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
 image = "ensemblorg/ensembl-vep"
@@ -60,7 +60,10 @@ pin_memory = true
 group_by_length = false
 drop_last = true
 balanced_sampling = true
-n_cond_tokens = 8
+n_cond_tokens = 12  # total virtual tokens across DNA/Protein/GO
+go_tokens = 1       # allocate 1 token for Gene Ontology embeddings
+conv_dim = 256
+conv_layers = 3
 prompt_dropout_prob = 0.3
 
 [Run]

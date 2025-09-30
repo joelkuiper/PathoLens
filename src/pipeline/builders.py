@@ -47,20 +47,19 @@ def build_dna_caches(
     try:
         for split, df in splits.items():
             meta_path = meta_dir / f"clinvar_{split}.feather"
-            npz_path = dna_dir / f"dna_{split}_eff_fp16.npz"
+            archive_path = dna_dir / f"dna_{split}_eff_fp16.h5"
             windows_path = dna_dir / f"dna_{split}_windows.feather"
             print(
-                f"[dna] split={split} input_rows={len(df)} meta={meta_path} npz={npz_path}"
+                f"[dna] split={split} input_rows={len(df)} meta={meta_path} archive={archive_path}"
             )
             kept_df, _ = process_and_cache_dna(
                 df,
                 fasta,
                 window=cfg.dna.window,
                 batch_size=cfg.dna.batch_size,
-                pool=cfg.dna.pool,
                 max_length=cfg.dna.max_length,
                 out_meta=str(meta_path),
-                out_npz=str(npz_path),
+                out_h5=str(archive_path),
                 windows_meta=str(windows_path),
                 device=device,
                 limit=cfg.dna.limit,
@@ -79,7 +78,7 @@ def build_dna_caches(
 
             artifacts[split] = SplitArtifact(
                 meta=str(meta_path),
-                dna_npz=str(npz_path),
+                dna_h5=str(archive_path),
                 extras={
                     "dna_rows": int(len(kept_df)),
                     "dna_input_rows": int(len(df)),
@@ -165,7 +164,7 @@ def build_protein_caches(
                 )
 
         protein_meta_path = protein_dir / f"protein_{split}.feather"
-        npz_path = protein_dir / f"protein_{split}_eff_fp16.npz"
+        archive_path = protein_dir / f"protein_{split}_eff_fp16.h5"
         preloaded = vep_tables.get(split) if vep_tables else None
         if preloaded is not None:
             print(
@@ -175,11 +174,11 @@ def build_protein_caches(
         kept_df, _ = process_and_cache_protein(
             preloaded if preloaded is not None else combined_feather,
             out_meta=str(protein_meta_path),
-            out_npz=str(npz_path),
+            out_h5=str(archive_path),
             device=device,
             model_id=cfg.protein.model_id,
             batch_size=cfg.protein.batch_size,
-            pool=cfg.protein.pool,
+            window=cfg.protein.window,
             max_length=cfg.protein.max_length,
             force_embeddings=cfg.protein.force_embeddings
             or cfg.run.force_protein_embeddings,
@@ -234,7 +233,7 @@ def build_protein_caches(
         covered = int((base_df["protein_embedding_idx"] >= 0).sum())
         artifacts[split] = SplitArtifact(
             meta=str(final_meta_path),
-            protein_npz=str(npz_path),
+            protein_h5=str(archive_path),
             extras={
                 "protein_rows": int(len(kept_df)),
                 "protein_aligned": covered,

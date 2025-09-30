@@ -21,9 +21,9 @@ def build_sequence_datasets(
     datasets: Dict[str, SequenceTowerDataset] = {}
     go_npz = manifest.go_npz
     for split, artifact in manifest.splits.items():
-        if not artifact.meta or not artifact.dna_npz:
+        if not artifact.meta or not artifact.dna_h5:
             raise ValueError(f"Manifest entry for '{split}' missing DNA artifacts")
-        if not artifact.protein_npz:
+        if not artifact.protein_h5:
             raise ValueError(
                 f"Manifest entry for '{split}' missing protein artifacts"
             )
@@ -31,12 +31,11 @@ def build_sequence_datasets(
 
         ds = SequenceTowerDataset(
             meta_df=frame,
-            dna_npz=artifact.dna_npz,
+            dna_h5=artifact.dna_h5,
             go_npz=go_npz,
             make_label=make_label,
             label_col=label_col,
-            protein_npz=artifact.protein_npz,
-            protein_eff_key="prot_eff",
+            protein_h5=artifact.protein_h5,
             go_normalize=cfg.go.normalize,
             go_uppercase=cfg.go.uppercase_keys,
         )

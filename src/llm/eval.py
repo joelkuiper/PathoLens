@@ -8,7 +8,7 @@ import os
 import re
 import numpy as np
 import torch
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from tqdm import tqdm
 
 from src.llm.config import PROMPT_TMPL, BIN_LABELS
@@ -84,11 +84,53 @@ def evaluate_split_batched(
     adapter_dir = os.path.join(out_dir, "adapter")
     projector_path = os.path.join(out_dir, "projector")
 
+    def _block_bounds(entry) -> Optional[Tuple[int, int]]:
+        if entry is None:
+            return None
+        if isinstance(entry, slice):
+            return (int(entry.start or 0), int(entry.stop or 0))
+        if isinstance(entry, dict):
+            if "slice" in entry and isinstance(entry["slice"], slice):
+                sl = entry["slice"]
+                return (int(sl.start or 0), int(sl.stop or 0))
+            if "slices" in entry and isinstance(entry["slices"], dict):
+                starts: List[int] = []
+                stops: List[int] = []
+                for sl in entry["slices"].values():
+                    if isinstance(sl, slice):
+                        starts.append(int(sl.start or 0))
+                        stops.append(int(sl.stop or 0))
+                if starts and stops:
+                    return (min(starts), max(stops))
+        return None
+
+    def _block_len(bounds: Optional[Tuple[int, int]]) -> int:
+        if not bounds:
+            return 0
+        start, stop = bounds
+        return max(0, int(stop) - int(start))
+
     train_split = seq_ds["train"]
-    D_eff = int(train_split.D_eff)
-    D_go = int(getattr(train_split, "D_go", 0) or 0)
-    D_prot = int(train_split.D_prot)
-    D_cond = D_eff + D_go + D_prot
+    cond_spec = getattr(train_split, "cond_spec", None)
+    if cond_spec:
+        dna_bounds = _block_bounds(cond_spec.get("dna"))
+        go_bounds = _block_bounds(cond_spec.get("go"))
+        prot_bounds = _block_bounds(cond_spec.get("protein"))
+        D_eff = _block_len(dna_bounds)
+        D_go = _block_len(go_bounds)
+        D_prot = _block_len(prot_bounds)
+        known_bounds = [b for b in (dna_bounds, go_bounds, prot_bounds) if b]
+        if known_bounds:
+            D_cond = max(stop for _, stop in known_bounds)
+        else:
+            D_cond = int(getattr(train_split, "total_dim", 0))
+        if not D_cond:
+            D_cond = int(getattr(train_split, "total_dim", D_eff + D_go + D_prot))
+    else:
+        D_eff = int(getattr(train_split, "D_eff", 0))
+        D_go = int(getattr(train_split, "D_go", 0) or 0)
+        D_prot = int(getattr(train_split, "D_prot", 0))
+        D_cond = D_eff + D_go + D_prot
     print(
         "[INFO] Eval: "
         f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"

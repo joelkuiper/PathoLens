@@ -66,9 +66,8 @@ class PathsConfig:
 @dataclass
 class DNAConfig:
     model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g"
-    window: int = 512
-    max_length: int = 512
-    pool: str = "mean"
+    window: int = 128
+    max_length: int = 384
     batch_size: int = 16
     limit: Optional[int] = None
     force_windows: bool = False
@@ -80,7 +79,7 @@ class ProteinConfig:
     model_id: str = "facebook/esm2_t12_35M_UR50D"
     batch_size: int = 8
     max_length: int = 2048
-    pool: str = "mean"
+    window: int = 127
     vep_cache_dir: Optional[Path] = None
     vep_fasta_relpath: Optional[str] = None
     image: str = "ensemblorg/ensembl-vep"
@@ -118,7 +117,11 @@ class LLMRunConfig:
     group_by_length: bool = False
     drop_last: bool = True
     balanced_sampling: bool = True
-    n_cond_tokens: int = 8
+    # Conditioning projector knobs
+    n_cond_tokens: int = 12
+    go_tokens: int = 1
+    conv_dim: int = 256
+    conv_layers: int = 3
     prompt_dropout_prob: float = 0.3
 
 

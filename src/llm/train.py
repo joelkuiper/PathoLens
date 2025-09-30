@@ -21,7 +21,7 @@ from transformers import (
 
 from .config import LLMRunConfig, set_all_seeds
 from .modeling import build_qwen_with_lora
-from .data import CondTextDataset, make_collator
+from .data import CondDataset, make_collator
 from .context import build_ctx_from_row
 
 
@@ -301,7 +301,7 @@ def _true_label_from_meta(row) -> int | None:
         return None
 
 
-def _make_balanced_sampler(train_ds: CondTextDataset) -> WeightedRandomSampler:
+def _make_balanced_sampler(train_ds: CondDataset) -> WeightedRandomSampler:
     ys = []
     for i in range(len(train_ds)):
         row = train_ds.meta.iloc[i]
@@ -448,21 +448,25 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     D_eff = int(train_split.D_eff)
     D_go = int(getattr(train_split, "D_go", 0) or 0)
     D_prot = int(train_split.D_prot)
-    D_cond = D_eff + D_go + D_prot
+    cond_spec = getattr(train_split, "cond_spec", None)
+    if cond_spec is None:
+        raise RuntimeError("SequenceTowerDataset must expose 'cond_spec' for projector build")
+    D_cond = int(cond_spec.get("total_dim", D_eff + D_go + D_prot))
     print(
-        "[INFO] LLM pipeline: " f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
+        "[INFO] LLM pipeline: "
+        f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
     )
 
     # build model with matching projector input
-    tok, base_model, projector = build_qwen_with_lora(cfg, D_cond)
+    tok, base_model, projector = build_qwen_with_lora(cfg, cond_spec)
 
     # attach prompt dropout knob
     base_model.prompt_dropout_prob = float(cfg.prompt_dropout_prob)
     base_model.config.use_cache = False
 
-    print("[DEBUG] Building CondTextDataset(train/val) ...")
-    train_ds = CondTextDataset(seq_ds["train"], tokenizer=tok)
-    val_ds = CondTextDataset(seq_ds["val"], tokenizer=tok)
+    print("[DEBUG] Building CondDataset(train/val) ...")
+    train_ds = CondDataset(seq_ds["train"], tokenizer=tok)
+    val_ds = CondDataset(seq_ds["val"], tokenizer=tok)
     # sanity: dataset D_cond must match projector's in_features
     assert train_ds.D_cond == D_cond == val_ds.D_cond == projector.d_in, (
         f"D_cond mismatch: dataset(train)={train_ds.D_cond}, dataset(val)={val_ds.D_cond}, "
