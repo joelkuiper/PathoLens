@@ -6,8 +6,8 @@ from typing import Dict, Optional
 import pandas as pd
 import numpy as np
 
-from src.dna_utils import load_fasta, process_and_cache_dna
-from src.protein_utils import process_and_cache_protein
+from src.dna_utils import load_fasta, process_dna_sequences
+from src.protein_utils import process_protein_sequences
 from vep_pipeline import run_vep_pipeline
 
 from .config import PipelineConfig
@@ -27,7 +27,6 @@ def _ensure_variation_key(df: pd.DataFrame, *, column: str = "variation_key") ->
 def build_dna_caches(
     cfg: PipelineConfig,
     splits: Dict[str, pd.DataFrame],
-    device: str,
 ) -> Dict[str, SplitArtifact]:
     """Build DNA embeddings and update ``splits`` in-place.
 
@@ -47,26 +46,19 @@ def build_dna_caches(
     try:
         for split, df in splits.items():
             meta_path = meta_dir / f"clinvar_{split}.feather"
-            archive_path = dna_dir / f"dna_{split}_eff_fp16.h5"
             windows_path = dna_dir / f"dna_{split}_windows.feather"
             print(
-                f"[dna] split={split} input_rows={len(df)} meta={meta_path} archive={archive_path}"
+                f"[dna] split={split} input_rows={len(df)} meta={meta_path}"
             )
-            kept_df, _ = process_and_cache_dna(
+            kept_df = process_dna_sequences(
                 df,
                 fasta,
                 window=cfg.dna.window,
-                batch_size=cfg.dna.batch_size,
                 max_length=cfg.dna.max_length,
                 out_meta=str(meta_path),
-                out_h5=str(archive_path),
                 windows_meta=str(windows_path),
-                device=device,
                 limit=cfg.dna.limit,
-                dna_model_id=cfg.dna.model_id,
                 force_windows=cfg.dna.force_windows or cfg.run.force_dna_windows,
-                force_embeddings=cfg.dna.force_embeddings
-                or cfg.run.force_dna_embeddings,
             )
             kept_df = _ensure_variation_key(kept_df)
             if "dna_embedding_idx" not in kept_df.columns:
@@ -78,7 +70,6 @@ def build_dna_caches(
 
             artifacts[split] = SplitArtifact(
                 meta=str(meta_path),
-                dna_h5=str(archive_path),
                 extras={
                     "dna_rows": int(len(kept_df)),
                     "dna_input_rows": int(len(df)),
@@ -96,7 +87,6 @@ def build_dna_caches(
 def build_protein_caches(
     cfg: PipelineConfig,
     splits: Dict[str, pd.DataFrame],
-    device: str,
     *,
     split_paths: Optional[Dict[str, Path]] = None,
     vep_paths: Optional[Dict[str, Path]] = None,
@@ -164,24 +154,17 @@ def build_protein_caches(
                 )
 
         protein_meta_path = protein_dir / f"protein_{split}.feather"
-        archive_path = protein_dir / f"protein_{split}_eff_fp16.h5"
         preloaded = vep_tables.get(split) if vep_tables else None
         if preloaded is not None:
             print(
                 f"[protein] using cached VEP dataframe for {split}: rows={len(preloaded)}"
             )
 
-        kept_df, _ = process_and_cache_protein(
+        kept_df = process_protein_sequences(
             preloaded if preloaded is not None else combined_feather,
             out_meta=str(protein_meta_path),
-            out_h5=str(archive_path),
-            device=device,
-            model_id=cfg.protein.model_id,
-            batch_size=cfg.protein.batch_size,
             window=cfg.protein.window,
             max_length=cfg.protein.max_length,
-            force_embeddings=cfg.protein.force_embeddings
-            or cfg.run.force_protein_embeddings,
         )
         final_meta_path = (
             Path(meta_paths[split])
@@ -191,37 +174,36 @@ def build_protein_caches(
         final_meta_path.parent.mkdir(parents=True, exist_ok=True)
 
         base_df = _ensure_variation_key(base_df)
-        prot_df = kept_df.rename(
-            columns={
-                "seq_wt": "protein_seq_wt",
-                "seq_mt": "protein_seq_mt",
-                "consequence_terms": "protein_consequence_terms",
-            }
-        ).copy()
-        prot_df["variation_key"] = kept_df["id"].astype("string").fillna("")
+        prot_df = kept_df.copy()
+        if "variation_key" not in prot_df.columns:
+            key_series = prot_df.get("vep_id", prot_df.get("id", pd.Series(dtype="string")))
+            prot_df["variation_key"] = key_series.astype("string").fillna("")
 
-        merge_cols = [
-            "protein_embedding_idx",
-            "protein_seq_wt",
-            "protein_seq_mt",
-            "protein_consequence_terms",
-        ]
-        available_cols = [c for c in merge_cols if c in prot_df.columns]
-        drop_cols = [c for c in available_cols if c in base_df.columns]
+        merge_cols = [c for c in prot_df.columns if c != "variation_key"]
+        drop_cols = [c for c in merge_cols if c in base_df.columns]
         if drop_cols:
             base_df = base_df.drop(columns=drop_cols)
         merged = base_df.merge(
-            prot_df[["variation_key", *available_cols]],
+            prot_df[["variation_key", *merge_cols]],
             how="left",
             on="variation_key",
         )
 
         if "protein_embedding_idx" in merged.columns:
-            merged["protein_embedding_idx"] = merged["protein_embedding_idx"].fillna(-1).astype(
-                np.int32
+            merged["protein_embedding_idx"] = (
+                merged["protein_embedding_idx"].fillna(-1).astype(np.int32)
             )
         else:
             merged["protein_embedding_idx"] = np.full(len(merged), -1, dtype=np.int32)
+
+        if "protein_frameshift" in merged.columns:
+            merged["protein_frameshift"] = merged["protein_frameshift"].fillna(False).astype(bool)
+
+        if "protein_seq_len" in merged.columns:
+            merged["protein_seq_len"] = merged["protein_seq_len"].fillna(0).astype(np.int32)
+
+        if "protein_edit_idx" in merged.columns:
+            merged["protein_edit_idx"] = merged["protein_edit_idx"].fillna(0).astype(np.int32)
 
         merged = merged.reset_index(drop=True)
         merged.to_feather(final_meta_path)
@@ -233,7 +215,6 @@ def build_protein_caches(
         covered = int((base_df["protein_embedding_idx"] >= 0).sum())
         artifacts[split] = SplitArtifact(
             meta=str(final_meta_path),
-            protein_h5=str(archive_path),
             extras={
                 "protein_rows": int(len(kept_df)),
                 "protein_aligned": covered,

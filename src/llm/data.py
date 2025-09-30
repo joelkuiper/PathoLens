@@ -1,7 +1,7 @@
 # src/llm/data.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Tuple
+from typing import Optional, Tuple, Union
 import time
 import numpy as np
 import torch
@@ -9,6 +9,19 @@ from torch.utils.data import Dataset
 from .config import PROMPT_TMPL
 from .chat import build_chat_strings
 from .context import build_ctx_from_row
+
+
+_TORCH_DTYPE_BY_NUMPY = {
+    np.dtype("float16"): torch.float16,
+    np.dtype("float32"): torch.float32,
+    np.dtype("float64"): torch.float64,
+}
+
+
+def _to_numpy_dtype(value: Optional[Union[str, np.dtype]]) -> np.dtype:
+    if value is None:
+        return np.dtype("float32")
+    return np.dtype(value)
 
 
 def row_to_example(meta_row) -> Tuple[str, str]:
@@ -36,6 +49,10 @@ class CondDataset(Dataset):
         t0 = time.time()
         self.seq_ds = seq_ds
         self.meta = seq_ds.meta
+        self.cond_dtype = _to_numpy_dtype(getattr(seq_ds, "cond_dtype", None))
+        self.cond_torch_dtype = _TORCH_DTYPE_BY_NUMPY.get(
+            self.cond_dtype, torch.float32
+        )
         spec = getattr(seq_ds, "cond_spec", None)
         if spec is None:
             raise AttributeError(
@@ -76,11 +93,14 @@ class CondDataset(Dataset):
 
     def __getitem__(self, i: int):
         x, *_ = self.seq_ds[i]  # v contains [dna | prot]
-        x = x if isinstance(x, np.ndarray) else x.numpy()
-        x = x.astype("float32", copy=False)
+        if isinstance(x, torch.Tensor):
+            cond = x.detach().cpu().numpy()
+        else:
+            cond = np.asarray(x)
+        cond = cond.astype(self.cond_dtype, copy=False)
 
         # Slice *exactly* the conditioning span
-        cond = x[: self.D_cond]
+        cond = cond[: self.D_cond]
 
         meta_row = self.meta.iloc[i]
         prompt, target = row_to_example(meta_row)
@@ -88,12 +108,25 @@ class CondDataset(Dataset):
             raise KeyError("CondDataset requires '_y' label in metadata.")
         y = int(meta_row.get("_y"))
 
-        return {"cond_vec": cond, "prompt": prompt, "target": target, "_y": y}
+        return {
+            "cond_vec": cond,
+            "prompt": prompt,
+            "target": target,
+            "_y": y,
+        }
 
 
 def make_collator(
-    tokenizer, max_len: int = 384, label_boost: float = 5.0, mask_think: bool = True
+    tokenizer,
+    max_len: int = 384,
+    label_boost: float = 5.0,
+    mask_think: bool = True,
+    *,
+    cond_dtype: Optional[Union[str, np.dtype]] = None,
 ):
+    np_cond_dtype = _to_numpy_dtype(cond_dtype)
+    torch_cond_dtype = _TORCH_DTYPE_BY_NUMPY.get(np_cond_dtype, torch.float32)
+
     # tiny helpers for label token upweight (optional)
     tok_B = tokenizer.encode("Benign", add_special_tokens=False)
     tok_P = tokenizer.encode("Pathogenic", add_special_tokens=False)
@@ -188,9 +221,8 @@ def make_collator(
                     label_weights[i, j:k2] = 0.0
                     seek_from = k2
 
-        cond_vec = torch.from_numpy(
-            np.stack([b["cond_vec"] for b in batch]).astype("float32")
-        )
+        cond_arr = np.asarray([b["cond_vec"] for b in batch], dtype=np_cond_dtype)
+        cond_vec = torch.from_numpy(cond_arr).to(dtype=torch_cond_dtype)
         try:
             gold_y = torch.tensor([int(b["_y"]) for b in batch], dtype=torch.long)
         except KeyError as exc:  # pragma: no cover - defensive guard

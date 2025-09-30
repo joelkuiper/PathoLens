@@ -8,10 +8,13 @@ from pprint import pprint
 
 import pandas as pd
 
-from util import get_device
-
 from src.clinvar import load_clinvar_variants
-from src.pipeline import PipelineManifest, SplitArtifact, load_pipeline_config
+from src.pipeline import (
+    PipelineManifest,
+    SplitArtifact,
+    load_pipeline_config,
+    resolve_device,
+)
 from src.pipeline.builders import build_dna_caches, build_protein_caches
 from src.pipeline.clinvar import _split_by_gene, prepare_clinvar_splits
 from src.pipeline.datasets import build_sequence_datasets
@@ -30,10 +33,6 @@ def _merge_artifacts(
         existing = combined[split]
         if part.meta:
             existing.meta = part.meta
-        if part.dna_h5:
-            existing.dna_h5 = part.dna_h5
-        if part.protein_h5:
-            existing.protein_h5 = part.protein_h5
         existing.extras.update(part.extras)
     return combined
 
@@ -239,7 +238,10 @@ def main() -> None:
     args = parse_args()
     cfg = load_pipeline_config(args.config)
 
-    device = args.device or cfg.run.device or get_device()
+    if args.device:
+        cfg.run.device = resolve_device(args.device)
+
+    device = cfg.run.device
     print(f"[config] loaded from {Path(args.config).resolve()}")
     print(f"[config] artifacts dir: {cfg.paths.artifacts}")
     print(f"[config] device: {device}")
@@ -262,7 +264,7 @@ def main() -> None:
         )
 
     # ----- DNA caches -----
-    dna_artifacts = build_dna_caches(cfg, splits, device)
+    dna_artifacts = build_dna_caches(cfg, splits)
 
     # ----- Protein caches -----
     meta_paths = {
@@ -273,7 +275,6 @@ def main() -> None:
     protein_artifacts = build_protein_caches(
         cfg,
         splits,
-        device,
         split_paths=split_paths,
         vep_paths=vep_paths,
         vep_tables=vep_tables,

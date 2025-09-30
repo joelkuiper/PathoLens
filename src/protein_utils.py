@@ -1,36 +1,15 @@
 # src/protein_utils.py
 from __future__ import annotations
-from typing import Tuple, Optional, List, Dict
+from typing import Tuple, Optional, List, Dict, Any, Sequence
 from difflib import SequenceMatcher
 import os
 from pathlib import Path
 
-import math
-import h5py
 import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModel
-
-from src.sequence_cache import (
-    SequenceArchiveLayout,
-    ensure_h5_path,
-    initialise_sequence_archive,
-    open_sequence_archive,
-)
-
-# Layout describing protein HDF5 dataset names
-PROTEIN_ARCHIVE_LAYOUT = SequenceArchiveLayout(
-    wt_tokens="prot_wt_tokens",
-    mt_tokens="prot_mt_tokens",
-    wt_mask="prot_wt_mask",
-    mt_mask="prot_mt_mask",
-    edit_mask="prot_edit_mask",
-    gap_mask="prot_gap_mask",
-    pos="prot_pos",
-    extra_masks=("prot_frameshift_mask",),
-)
 
 # ============================================================
 # Amino-acid sanitization
@@ -159,6 +138,7 @@ def _device_is_mps(device: str | torch.device) -> bool:
 def build_protein_encoder(
     model_id: str = "facebook/esm2_t33_650M_UR50D",
     device: Optional[str] = None,
+    revision: Optional[str] = None,
 ):
     """
     Create tokenizer + model on the requested device.
@@ -171,9 +151,21 @@ def build_protein_encoder(
         if torch.cuda.is_available()
         else ("mps" if torch.backends.mps.is_available() else "cpu")
     )
-    tok = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True, use_fast=False
-    )
+    load_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+    if revision:
+        load_kwargs["revision"] = revision
+
+    def _load_tokenizer(*, force_download: bool = False):
+        tok_kwargs = dict(load_kwargs)
+        if force_download:
+            tok_kwargs["force_download"] = True
+        return AutoTokenizer.from_pretrained(
+            model_id,
+            use_fast=False,
+            **tok_kwargs,
+        )
+
+    tok = _load_tokenizer()
     if tok.pad_token is None:
         tok.add_special_tokens({"pad_token": tok.eos_token or "<pad>"})
     tok.padding_side = "right"
@@ -187,15 +179,41 @@ def build_protein_encoder(
     else:
         prefer_dtype = torch.float32
 
+    def _load_model(
+        target_dtype: torch.dtype, *, force_download: bool = False
+    ) -> torch.nn.Module:
+        model_kwargs = dict(load_kwargs)
+        if force_download:
+            model_kwargs["force_download"] = True
+        try:
+            return AutoModel.from_pretrained(
+                model_id,
+                dtype=target_dtype,
+                **model_kwargs,
+            )
+        except TypeError:
+            model_kwargs.pop("dtype", None)
+            model_kwargs["torch_dtype"] = target_dtype
+            return AutoModel.from_pretrained(
+                model_id,
+                **model_kwargs,
+            )
+
     try:
-        enc = AutoModel.from_pretrained(
-            model_id, trust_remote_code=True, torch_dtype=prefer_dtype
-        )
+        enc = _load_model(prefer_dtype)
+    except RuntimeError as exc:
+        if revision is None and "size mismatch" in str(exc):
+            tok = _load_tokenizer(force_download=True)
+            enc = _load_model(prefer_dtype, force_download=True)
+        elif prefer_dtype != torch.float32:
+            enc = _load_model(torch.float32)
+        else:
+            raise
     except Exception:
-        # Fallback to fp32 if half/bf16 unsupported
-        enc = AutoModel.from_pretrained(
-            model_id, trust_remote_code=True, torch_dtype=torch.float32
-        )
+        if prefer_dtype != torch.float32:
+            enc = _load_model(torch.float32)
+        else:
+            raise
 
     if enc.get_input_embeddings().num_embeddings < len(tok):
         enc.resize_token_embeddings(len(tok))
@@ -232,6 +250,185 @@ def encode_sequence_tokens(
     out = out[:, 1:, :]
     attn = attn[:, 1:]
     return out.to(torch.float32), attn.to(torch.float32)
+
+
+class ProteinConditioningStreamer:
+    """Helper that lazily encodes protein conditioning tensors on demand."""
+
+    def __init__(
+        self,
+        *,
+        tokenizer,
+        model,
+        device,
+        seq_len: int,
+        embed_dim: int,
+        batch_size: int,
+        records: Dict[int, Dict[str, Any]],
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.model = model
+        self.device = device
+        self.seq_len = int(seq_len)
+        self.embed_dim = int(embed_dim)
+        self.batch_size = max(1, int(batch_size))
+        self.records = records
+        self._base_pos = np.arange(self.seq_len, dtype="float32")
+
+    def encode(self, indices: Sequence[int]) -> Dict[int, Dict[str, np.ndarray]]:
+        if self.seq_len <= 0 or self.embed_dim <= 0:
+            return {}
+
+        valid = [int(i) for i in indices if int(i) in self.records]
+        if not valid:
+            return {}
+
+        outputs: Dict[int, Dict[str, np.ndarray]] = {}
+        max_len = self.seq_len + 1
+
+        for start in range(0, len(valid), self.batch_size):
+            chunk = valid[start : start + self.batch_size]
+            chunk_records = [self.records[i] for i in chunk]
+
+            wt_batch = [rec["wt_seq"] for rec in chunk_records]
+            mt_batch = [rec["mt_seq"] for rec in chunk_records]
+            edit_batch = [int(rec["edit_idx"]) for rec in chunk_records]
+            frame_batch = [bool(rec["frameshift"]) for rec in chunk_records]
+
+            combined = wt_batch + mt_batch
+            hidden, attn = encode_sequence_tokens(
+                combined,
+                self.model,
+                self.tokenizer,
+                self.device,
+                max_length=max_len,
+            )
+
+            hidden = hidden[:, : self.seq_len, :].to(torch.float32).cpu().numpy()
+            attn = attn[:, : self.seq_len].to(torch.float32).cpu().numpy()
+            half = len(chunk)
+            wt_hidden = hidden[:half]
+            mt_hidden = hidden[half:]
+            wt_attn = attn[:half]
+            mt_attn = attn[half:]
+            gap = np.logical_xor(wt_attn > 0, mt_attn > 0).astype("float32")
+
+            for j, arr_idx in enumerate(chunk):
+                edit_pos = min(max(int(edit_batch[j]), 0), self.seq_len - 1)
+                edit_vec = np.zeros((self.seq_len,), dtype="float32")
+                if self.seq_len > 0:
+                    edit_vec[edit_pos] = 1.0
+
+                frame_mask = np.zeros((self.seq_len,), dtype="float32")
+                if frame_batch[j] and self.seq_len > 0:
+                    frame_mask[edit_pos:] = 1.0
+
+                outputs[arr_idx] = {
+                    "wt_tokens": wt_hidden[j],
+                    "mt_tokens": mt_hidden[j],
+                    "wt_mask": wt_attn[j],
+                    "mt_mask": mt_attn[j],
+                    "edit_mask": edit_vec,
+                    "gap_mask": gap[j],
+                    "pos": (self._base_pos - float(edit_pos))[:, None],
+                    "frameshift_mask": frame_mask,
+                }
+
+        return outputs
+
+    def empty(self) -> Dict[str, np.ndarray]:
+        zeros_2d = np.zeros((self.seq_len, self.embed_dim), dtype="float32")
+        zeros_1d = np.zeros((self.seq_len,), dtype="float32")
+        return {
+            "wt_tokens": zeros_2d,
+            "mt_tokens": zeros_2d,
+            "wt_mask": zeros_1d,
+            "mt_mask": zeros_1d,
+            "edit_mask": zeros_1d,
+            "gap_mask": zeros_1d,
+            "pos": np.zeros((self.seq_len, 1), dtype="float32"),
+            "frameshift_mask": zeros_1d,
+        }
+
+
+def encode_protein_conditioning(
+    meta: pd.DataFrame,
+    *,
+    model_id: str = "facebook/esm2_t12_35M_UR50D",
+    revision: Optional[str] = None,
+    max_length: int = 2048,
+    batch_size: int = 8,
+    device: Optional[str] = None,
+) -> ProteinConditioningStreamer:
+    """Prepare a streamer that lazily encodes protein conditioning tensors."""
+
+    required = {
+        "protein_seq_wt",
+        "protein_seq_mt",
+        "protein_edit_idx",
+        "protein_seq_len",
+        "protein_frameshift",
+        "protein_embedding_idx",
+    }
+    missing = [col for col in required if col not in meta.columns]
+    if missing:
+        raise KeyError(
+            "Metadata frame missing protein sequence columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    uniq = (
+        meta[meta["protein_embedding_idx"] >= 0][list(required)]
+        .drop_duplicates("protein_embedding_idx")
+        .sort_values("protein_embedding_idx")
+    )
+
+    if uniq.empty:
+        tok, enc, run_device = build_protein_encoder(
+            model_id=model_id,
+            device=device,
+            revision=revision,
+        )
+        enc.eval()
+        return ProteinConditioningStreamer(
+            tokenizer=tok,
+            model=enc,
+            device=run_device,
+            seq_len=0,
+            embed_dim=0,
+            batch_size=batch_size,
+            records={},
+        )
+
+    seq_len = int(uniq["protein_seq_len"].iloc[0])
+    tok, enc, run_device = build_protein_encoder(
+        model_id=model_id,
+        device=device,
+        revision=revision,
+    )
+    seq_len = max(1, min(seq_len, int(max_length) - 1))
+    embed_dim = int(enc.get_input_embeddings().embedding_dim)
+
+    records: Dict[int, Dict[str, Any]] = {}
+
+    for row in uniq.itertuples(index=False):
+        arr_idx = int(row.protein_embedding_idx)
+        records[arr_idx] = {
+            "wt_seq": str(row.protein_seq_wt),
+            "mt_seq": str(row.protein_seq_mt),
+            "edit_idx": int(row.protein_edit_idx),
+            "frameshift": bool(row.protein_frameshift),
+        }
+
+    return ProteinConditioningStreamer(
+        tokenizer=tok,
+        model=enc,
+        device=run_device,
+        seq_len=seq_len,
+        embed_dim=embed_dim,
+        batch_size=batch_size,
+        records=records,
+    )
 # ============================================================
 # Embedding (unique dedupe + interleaved schedule + memmap)
 # ============================================================
@@ -479,36 +676,41 @@ def _read_any_table(path_or_df: str | Path | pd.DataFrame) -> pd.DataFrame:
 
 
 def load_vep_sequences(vep_combined: str | Path | pd.DataFrame) -> pd.DataFrame:
-    """
-    Expect columns (from your VEP join):
-      id (VariationID as str), protein_id, hgvsp, consequence_terms, seq_wt, seq_mt
-    - Sanitizes sequences
-    - Keeps only rows with both WT/MT present
-    - De-duplicates per (id, protein_id, hgvsp)
-    """
-    df = _read_any_table(vep_combined)
+    """Return the combined VEP annotations with sanitised WT/MT sequences.
 
-    # normalize id
-    if "id" not in df.columns and "VariationID" in df.columns:
-        df["id"] = df["VariationID"].astype(str)
-    else:
-        df["id"] = df["id"].astype(str)
+    The helper keeps the full annotation table so downstream consumers can
+    persist additional VEP-derived fields alongside the conditioning metadata.
+    """
 
-    # sanitize sequences
+    df = _read_any_table(vep_combined).copy()
+
+    # Normalise ID so callers can rely on a stable join key regardless of the
+    # VEP writer version (some emit ``id`` while older caches used
+    # ``VariationID``).
+    if "id" in df.columns:
+        df["id"] = df["id"].astype("string")
+    elif "VariationID" in df.columns:
+        df["id"] = df["VariationID"].astype("string")
+    else:  # pragma: no cover - defensive guard for unexpected schemas
+        raise KeyError("VEP annotations missing 'id' column")
+
+    # Sanitise the raw sequences (remove gaps, map non-canonical residues to X)
     for col in ("seq_wt", "seq_mt"):
         if col in df.columns:
             df[col] = df[col].map(sanitize_aa)
 
-    # keep rows that actually have both
-    keep = (
-        df["seq_wt"].notna()
-        & df["seq_mt"].notna()
-        & (df["seq_wt"] != "")
-        & (df["seq_mt"] != "")
-    )
-    df = df.loc[keep].copy()
+    # Keep only rows that carry both WT and MT sequences – the conditioning
+    # streamer requires both sides to be present.
+    if {"seq_wt", "seq_mt"}.issubset(df.columns):
+        keep = (
+            df["seq_wt"].astype("string").str.len().gt(0)
+            & df["seq_mt"].astype("string").str.len().gt(0)
+        )
+        df = df.loc[keep].copy()
 
-    # de-dup (id, protein, p-dot)
+    # De-duplicate by (id, protein_id, hgvsp) to keep a stable transcript
+    # choice while still allowing callers to reason about every retained VEP
+    # column.
     keys = [k for k in ["id", "protein_id", "hgvsp"] if k in df.columns]
     if keys:
         df = (
@@ -517,9 +719,7 @@ def load_vep_sequences(vep_combined: str | Path | pd.DataFrame) -> pd.DataFrame:
             .reset_index(drop=True)
         )
 
-    return df[
-        ["id", "protein_id", "hgvsp", "consequence_terms", "seq_wt", "seq_mt"]
-    ].copy()
+    return df
 
 
 # ============================================================
@@ -538,114 +738,38 @@ def write_protein_meta(meta_df: pd.DataFrame, out_feather: str) -> None:
 # ============================================================
 
 
-def process_and_cache_protein(
+def process_protein_sequences(
     vep_combined: str | Path | pd.DataFrame,
     *,
     out_meta: str,
-    out_h5: str,
-    device: Optional[str] = None,
-    model_id: str = "facebook/esm2_t33_650M_UR50D",
-    batch_size: int = 8,
     window: int = 127,
     max_length: int = 2048,
-    force_embeddings: bool = False,
-) -> tuple[pd.DataFrame, str]:
-    """
-    Loads VEP-joined WT/MT sequences, embeds with ESM2 (unique-only with interleaved scheduling),
-    saves an embedding archive (HDF5) + Feather (meta). Returns (kept_meta_df, out_h5_path).
+) -> pd.DataFrame:
+    """Prepare protein WT/MT windows and associated metadata for streaming."""
 
-    Memory behavior:
-      - Embeddings for UNIQUE sequences are written to disk memmaps (no big RAM spikes).
-      - Batch sizes adapt to token budget and back off on OOM (esp. on MPS).
-    """
     os.makedirs(os.path.dirname(out_meta), exist_ok=True)
-    out_h5_path = ensure_h5_path(out_h5, kind="Protein")
-
-    if os.path.exists(out_h5_path):
-        try:
-            size = os.path.getsize(out_h5_path)
-        except OSError:
-            size = -1
-        print(
-            f"[protein][cache] existing archive at {out_h5_path} size={size if size >= 0 else 'unknown'}"
-        )
-    else:
-        print(f"[protein][cache] no existing archive at {out_h5_path}")
 
     # Load and keep usable rows
     pairs = load_vep_sequences(vep_combined)
     if len(pairs) == 0:
         raise RuntimeError("No WT/MT sequences found in VEP combined file.")
     kept = pairs.reset_index(drop=True).copy()
-    print(f"[protein][cache] loaded rows={len(kept)} from VEP combined input")
+    print(f"[protein] loaded rows={len(kept)} from VEP combined input")
+
+    base_cols = list(kept.columns)
     kept["protein_embedding_idx"] = np.arange(len(kept), dtype=np.int32)
 
-    wt_sanitized = [sanitize_aa(str(s)) for s in kept["seq_wt"]]
-    mt_sanitized = [sanitize_aa(str(s)) for s in kept["seq_mt"]]
-    kept["seq_wt"] = wt_sanitized
-    kept["seq_mt"] = mt_sanitized
+    wt_sanitized = kept.get("seq_wt", pd.Series(dtype="string")).astype("string")
+    mt_sanitized = kept.get("seq_mt", pd.Series(dtype="string")).astype("string")
+
+    if wt_sanitized.empty or mt_sanitized.empty:
+        raise RuntimeError("VEP annotations missing WT/MT sequences after sanitisation")
+
+    wt_sanitized = [sanitize_aa(str(s)) for s in wt_sanitized]
+    mt_sanitized = [sanitize_aa(str(s)) for s in mt_sanitized]
 
     target_seq_len = max(1, min(int(window), int(max_length) - 1))
-    print(
-        f"[protein][cache] preparing windows: target_seq_len={target_seq_len} window_param={window} max_length={max_length}"
-    )
-
-    # Short-circuit if cache matches (keeps re-runs instant)
-    required = {
-        "prot_wt_tokens",
-        "prot_mt_tokens",
-        "prot_wt_mask",
-        "prot_mt_mask",
-        "prot_edit_mask",
-        "prot_gap_mask",
-        "prot_pos",
-        "prot_frameshift_mask",
-    }
-    need_embed = True
-    if os.path.exists(out_h5_path) and not force_embeddings:
-        try:
-            with h5py.File(out_h5_path, "r") as store:
-                keys = set(store.keys())
-                if required.issubset(keys):
-                    same_rows = store["prot_wt_tokens"].shape[0] == len(kept)
-                    stored_seq_len = int(store.attrs.get("seq_len", -1))
-                    same_len = stored_seq_len == target_seq_len
-                    completed = int(store.attrs.get("complete", 0)) == 1
-                    need_embed = not (same_rows and same_len and completed)
-                else:
-                    need_embed = True
-            if not need_embed:
-                print(
-                    f"[protein][embeddings] reuse {out_h5_path} rows={len(kept)} force={force_embeddings}"
-                )
-        except Exception:
-            need_embed = True
-
-    encoder_bundle: Optional[Tuple] = None
-    archive_prepared = False
-    if need_embed:
-        tok, enc, device = build_protein_encoder(model_id=model_id, device=device)
-        seq_len = max(1, min(int(target_seq_len), int(max_length) - 1))
-        D = enc.get_input_embeddings().embedding_dim
-        N = len(kept)
-        batch_rows = max(1, int(batch_size))
-        print(
-            f"[protein][embeddings] initialise archive path={out_h5_path} "
-            f"rows={N} seq_len={seq_len} embed_dim={D}"
-        )
-        initialise_sequence_archive(
-            out_h5_path,
-            layout=PROTEIN_ARCHIVE_LAYOUT,
-            n_rows=N,
-            seq_len=seq_len,
-            embed_dim=D,
-            chunk_rows=batch_rows,
-            kind="Protein",
-        )
-        archive_prepared = True
-        encoder_bundle = (tok, enc, device, seq_len, D, N, batch_rows)
-
-    # window trimming now that archive (if needed) exists on disk
+    # Trim sequences to the target window length for downstream encoding
     trimmed_wt: List[str] = []
     trimmed_mt: List[str] = []
     edit_positions: List[int] = []
@@ -664,168 +788,42 @@ def process_and_cache_protein(
         edit_positions.append(int(idx_wt))
         frameshift_flags.append((len(mt_clean) - len(wt_clean)) % 3 != 0)
 
-    kept["seq_wt"] = trimmed_wt
-    kept["seq_mt"] = trimmed_mt
+    kept["protein_seq_wt"] = trimmed_wt
+    kept["protein_seq_mt"] = trimmed_mt
     kept["protein_edit_idx"] = [int(x) for x in edit_positions]
     kept["protein_seq_len"] = int(target_seq_len)
     kept["protein_frameshift"] = [bool(x) for x in frameshift_flags]
 
-    if need_embed and encoder_bundle is not None:
-        tok, enc, device, seq_len, D, N, batch_rows = encoder_bundle
-        indices = list(range(N))
-        wt_seqs = [str(s) for s in kept["seq_wt"].tolist()]
-        mt_seqs = [str(s) for s in kept["seq_mt"].tolist()]
-        edit_indices = [min(max(int(edit_positions[i]), 0), seq_len - 1) for i in range(N)]
-        base_pos = np.arange(seq_len, dtype=np.float16)
+    # Preserve the raw (sanitised) WT/MT sequences and the rest of the VEP
+    # annotations by prefixing them with ``vep_`` so they can live alongside the
+    # conditioning features in the merged dataframe.
+    rename_map: Dict[str, str] = {}
+    for col in base_cols:
+        if col == "id":
+            rename_map[col] = "vep_id"
+        else:
+            rename_map[col] = f"vep_{col}"
 
-        if not archive_prepared:
-            initialise_sequence_archive(
-                out_h5_path,
-                layout=PROTEIN_ARCHIVE_LAYOUT,
-                n_rows=N,
-                seq_len=seq_len,
-                embed_dim=D,
-                chunk_rows=batch_rows,
-                kind="Protein",
-            )
-        print(
-            f"[protein][embeddings] start rows={N} seq_len={seq_len} embed_dim={D} batch_size={batch_rows} device={device}"
-        )
+    kept = kept.rename(columns=rename_map)
+    kept["variation_key"] = kept.get("vep_id", pd.Series(dtype="string")).astype("string").fillna("")
 
-        with open_sequence_archive(
-            out_h5_path, layout=PROTEIN_ARCHIVE_LAYOUT, kind="Protein"
-        ) as archive:
-            wt_tokens_ds = archive.wt_tokens
-            mt_tokens_ds = archive.mt_tokens
-            wt_mask_ds = archive.wt_mask
-            mt_mask_ds = archive.mt_mask
-            edit_mask_ds = archive.edit_mask
-            gap_mask_ds = archive.gap_mask
-            pos_ds = archive.pos
-            frameshift_ds = archive.extra_masks.get("prot_frameshift_mask")
+    # Maintain commonly-used aliases for downstream code while still exposing the
+    # full VEP block.
+    if "vep_protein_id" in kept.columns and "protein_id" not in kept.columns:
+        kept["protein_id"] = kept["vep_protein_id"].astype("string")
+    if "vep_consequence_terms" in kept.columns:
+        kept["protein_consequence_terms"] = kept["vep_consequence_terms"]
 
-            total_batches = max(1, math.ceil(N / max(int(batch_size), 1)))
-            for chunk in tqdm(
-                batch_iter(indices, batch_size),
-                total=total_batches,
-                desc="[protein][embeddings] batches",
-                unit="batch",
-            ):
-                idxs = list(chunk)
-                idxs_arr = np.array(idxs, dtype=np.int64)
-                bsz = len(idxs_arr)
-                wt_batch = [wt_seqs[i] for i in idxs_arr]
-                mt_batch = [mt_seqs[i] for i in idxs_arr]
+    # Ensure string columns retain a consistent dtype when written to feather.
+    for col in ["protein_seq_wt", "protein_seq_mt"]:
+        kept[col] = pd.Series(kept[col], dtype="string").fillna("")
 
-                combined = wt_batch + mt_batch
-                hidden, attn = encode_sequence_tokens(
-                    combined, enc, tok, device, max_length=seq_len + 1
-                )
-
-                hidden = hidden[:, :seq_len, :]
-                attn = attn[:, :seq_len]
-                wt_hidden = (
-                    hidden[:bsz, :, :]
-                    .to(dtype=torch.float16)
-                    .cpu()
-                    .contiguous()
-                    .numpy()
-                )
-                mt_hidden = (
-                    hidden[bsz:, :, :]
-                    .to(dtype=torch.float16)
-                    .cpu()
-                    .contiguous()
-                    .numpy()
-                )
-                wt_attn = attn[:bsz]
-                mt_attn = attn[bsz:]
-                wt_mask_batch = (
-                    wt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
-                )
-                mt_mask_batch = (
-                    mt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
-                )
-                gap_batch = (
-                    torch.logical_xor(wt_attn.bool(), mt_attn.bool())
-                    .to(dtype=torch.uint8)
-                    .cpu()
-                    .contiguous()
-                    .numpy()
-                )
-
-                edit_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
-                pos_batch = np.zeros((bsz, seq_len, 1), dtype=np.float16)
-                frameshift_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
-                for j, row_idx in enumerate(idxs_arr):
-                    idx = edit_indices[row_idx]
-                    edit_batch[j, idx] = 1
-                    pos_batch[j, :, 0] = base_pos - np.float16(idx)
-                    if frameshift_flags[row_idx]:
-                        frameshift_batch[j, idx:] = 1
-
-                if bsz and np.all(np.diff(idxs_arr) == 1):
-                    start = int(idxs_arr[0])
-                    end = start + bsz
-                    wt_tokens_ds[start:end, :, :] = wt_hidden
-                    mt_tokens_ds[start:end, :, :] = mt_hidden
-                    wt_mask_ds[start:end, :] = wt_mask_batch
-                    mt_mask_ds[start:end, :] = mt_mask_batch
-                    edit_mask_ds[start:end, :] = edit_batch
-                    gap_mask_ds[start:end, :] = gap_batch
-                    pos_ds[start:end, :, :] = pos_batch
-                    if frameshift_ds is not None:
-                        frameshift_ds[start:end, :] = frameshift_batch
-                else:
-                    wt_tokens_ds[idxs_arr, :, :] = wt_hidden
-                    mt_tokens_ds[idxs_arr, :, :] = mt_hidden
-                    wt_mask_ds[idxs_arr, :] = wt_mask_batch
-                    mt_mask_ds[idxs_arr, :] = mt_mask_batch
-                    edit_mask_ds[idxs_arr, :] = edit_batch
-                    gap_mask_ds[idxs_arr, :] = gap_batch
-                    pos_ds[idxs_arr, :, :] = pos_batch
-                    if frameshift_ds is not None:
-                        frameshift_ds[idxs_arr, :] = frameshift_batch
-
-                archive.flush()
-
-            archive.store.attrs["complete"] = 1
-            archive.flush()
-        print(f"[protein][embeddings] wrote {out_h5_path} rows={N}")
-
-    with h5py.File(out_h5_path, "r") as store:
-        missing = required - set(store.keys())
-        if missing:
-            raise RuntimeError(f"{out_h5_path} missing keys: {sorted(missing)}")
-        seq_len_stored = int(store.attrs.get("seq_len", -1))
-        completed = int(store.attrs.get("complete", 0))
-        if seq_len_stored != target_seq_len:
-            raise RuntimeError(
-                "Protein archive seq_len mismatch: "
-                f"stored={seq_len_stored} expected={target_seq_len}"
-            )
-        N = store["prot_wt_tokens"].shape[0]
-    if completed != 1:
-        raise RuntimeError(
-            f"Protein archive {out_h5_path} is marked incomplete; regenerate the embeddings."
-        )
-    if N != len(kept):
-        raise RuntimeError(
-            f"Alignment mismatch: arrays N={N} vs kept N={len(kept)}"
-        )
+    kept["protein_embedding_idx"] = kept["protein_embedding_idx"].astype(np.int32)
+    kept["protein_edit_idx"] = kept["protein_edit_idx"].astype(np.int32)
+    kept["protein_seq_len"] = kept["protein_seq_len"].astype(np.int32)
+    kept["protein_frameshift"] = kept["protein_frameshift"].astype(bool)
 
     # Always (re)write meta so it matches whatever we embedded
     write_protein_meta(kept, out_meta)
     print(f"[protein][meta] wrote {out_meta} rows={len(kept)}")
-    return kept, str(out_h5_path)
-def batch_iter(xs: List[int], bs: int):
-    buf: List[int] = []
-    for x in xs:
-        buf.append(x)
-        if len(buf) == bs:
-            yield list(buf)
-            buf = []
-    if buf:
-        yield list(buf)
-
-
+    return kept
