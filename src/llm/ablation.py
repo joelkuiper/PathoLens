@@ -5,11 +5,7 @@
 #   - cond only   : prompt blanked, conditioning present
 #   - prompt only : prompt intact, conditioning zeroed
 #   - cond+noise  : prompt intact, conditioning + strong Gaussian noise
-#   - cond+permute: prompt intact, conditioning permuted across samples
 #   - pure-noise  : prompt intact, conditioning replaced by pure noise
-#   - cond×scale  : prompt intact, conditioning multiplied by scalar(s)
-#
-# Non-mutating: dataset and model artifacts are never modified.
 
 from __future__ import annotations
 import re
@@ -186,7 +182,11 @@ class _TransformedSplit:
             pack_tuple = False
 
         def _to_numpy(val):
-            return val.numpy() if hasattr(val, "numpy") else np.asarray(val, dtype=np.float32)
+            return (
+                val.numpy()
+                if hasattr(val, "numpy")
+                else np.asarray(val, dtype=np.float32)
+            )
 
         # Optionally fetch a different vector (permute across dataset)
         if self.cfg.mode == "permute":
@@ -431,13 +431,7 @@ def run_prompt_vs_cond_ablation(
         go_range = go_bounds if D_go > 0 else None
         prot_range = prot_bounds if D_prot > 0 else None
     else:
-        D_eff = int(getattr(train_split, "D_eff", 0))
-        D_go = int(getattr(train_split, "D_go", 0) or 0)
-        D_prot = int(getattr(train_split, "D_prot", 0))
-        dna_range = (0, D_eff) if D_eff > 0 else None
-        go_range = (D_eff, D_eff + D_go) if D_go > 0 else None
-        prot_start = D_eff + D_go
-        prot_range = (prot_start, prot_start + D_prot) if D_prot > 0 else None
+        raise ValueError("Expected cond_spec")
 
     # --- cond only (blank prompts) ---
     print("\n[ABL] cond only (prompts blanked)")
