@@ -101,7 +101,6 @@ def build_protein_caches(
     split_paths: Optional[Dict[str, Path]] = None,
     vep_paths: Optional[Dict[str, Path]] = None,
     vep_tables: Optional[Dict[str, pd.DataFrame]] = None,
-    meta_paths: Optional[Dict[str, Path]] = None,
 ) -> Dict[str, SplitArtifact]:
     """Build protein embeddings and merge them into the shared ``splits``.
 
@@ -183,11 +182,7 @@ def build_protein_caches(
             force_embeddings=cfg.protein.force_embeddings
             or cfg.run.force_protein_embeddings,
         )
-        final_meta_path = (
-            Path(meta_paths[split])
-            if meta_paths and split in meta_paths
-            else meta_dir / f"clinvar_{split}.feather"
-        )
+        final_meta_path = meta_dir / f"clinvar_{split}.feather"
         final_meta_path.parent.mkdir(parents=True, exist_ok=True)
 
         base_df = _ensure_variation_key(base_df)

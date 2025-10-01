@@ -80,11 +80,6 @@ class PipelineManifest:
         if extras is None or not isinstance(extras, dict):
             extras = {}
         created_at = data.get("created_at") or datetime.utcnow().isoformat()
-        for split_name, artifact in splits_dict.items():
-            if not artifact.protein_h5:
-                raise ValueError(
-                    f"Manifest split '{split_name}' missing protein_h5 entry"
-                )
         return cls(
             splits=splits_dict,
             created_at=created_at,

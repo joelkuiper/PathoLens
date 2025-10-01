@@ -262,23 +262,25 @@ def main() -> None:
         )
 
     # ----- DNA caches -----
-    dna_artifacts = build_dna_caches(cfg, splits, device)
+    if cfg.dna.enabled:
+        dna_artifacts = build_dna_caches(cfg, splits, device)
+    else:
+        dna_artifacts = {}
+        print("[dna] skipping DNA stage (DNA.enabled=false)")
 
     # ----- Protein caches -----
-    meta_paths = {
-        name: Path(artifact.meta)
-        for name, artifact in dna_artifacts.items()
-        if artifact.meta
-    }
-    protein_artifacts = build_protein_caches(
-        cfg,
-        splits,
-        device,
-        split_paths=split_paths,
-        vep_paths=vep_paths,
-        vep_tables=vep_tables,
-        meta_paths=meta_paths,
-    )
+    if cfg.protein.enabled:
+        protein_artifacts = build_protein_caches(
+            cfg,
+            splits,
+            device,
+            split_paths=split_paths,
+            vep_paths=vep_paths,
+            vep_tables=vep_tables,
+        )
+    else:
+        protein_artifacts = {}
+        print("[protein] skipping protein stage (Protein.enabled=false)")
 
     # ----- Manifest -----
     manifest_splits = _merge_artifacts(dna_artifacts, protein_artifacts)

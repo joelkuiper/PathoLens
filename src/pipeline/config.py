@@ -64,6 +64,7 @@ class PathsConfig:
 
 @dataclass
 class DNAConfig:
+    enabled: bool = True
     model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g"
     window: int = 128
     max_length: int = 384
@@ -75,6 +76,7 @@ class DNAConfig:
 
 @dataclass
 class ProteinConfig:
+    enabled: bool = True
     model_id: str = "facebook/esm2_t12_35M_UR50D"
     batch_size: int = 8
     max_length: int = 2048
@@ -137,15 +139,19 @@ class PipelineConfig:
     run: RunConfig = field(default_factory=RunConfig)
 
     def __post_init__(self) -> None:
-        missing: list[str] = []
-        if self.protein.vep_cache_dir is None:
-            missing.append("Protein.vep_cache_dir")
-        if not self.protein.vep_fasta_relpath:
-            missing.append("Protein.vep_fasta_relpath")
-        if missing:
-            raise ConfigError(
-                "Protein processing requires fields: " + ", ".join(missing)
-            )
+        if not self.dna.enabled and not self.protein.enabled:
+            raise ConfigError("At least one of DNA or Protein processing must be enabled")
+
+        if self.protein.enabled:
+            missing: list[str] = []
+            if self.protein.vep_cache_dir is None:
+                missing.append("Protein.vep_cache_dir")
+            if not self.protein.vep_fasta_relpath:
+                missing.append("Protein.vep_fasta_relpath")
+            if missing:
+                raise ConfigError(
+                    "Protein processing requires fields: " + ", ".join(missing)
+                )
         if self.run.manifest_path is None:
             default_manifest = self.paths.artifacts / "pipeline_manifest.json"
             self.run.manifest_path = default_manifest

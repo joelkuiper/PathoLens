@@ -12,6 +12,7 @@ fasta = "data/raw/GCF_000001405.40_GRCh38.p14_genomic.fna"
 artifacts = "artifacts"
 
 [DNA]
+enabled = true
 model_id = "InstaDeepAI/nucleotide-transformer-500m-1000g"
 window = 128
 max_length = 384
@@ -20,6 +21,7 @@ force_windows = false
 force_embeddings = false
 
 [Protein]
+enabled = true
 model_id = "facebook/esm2_t12_35M_UR50D"
 batch_size = 8
 # ``window`` is the target length (residues) for the centered protein slice
