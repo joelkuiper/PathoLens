@@ -47,7 +47,9 @@ class ConvBlock(nn.Module):
         self.norm = nn.LayerNorm(channels)
         self.act = nn.GELU()
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Apply the block, respecting optional padding mask."""
 
         if mask is not None:
@@ -68,7 +70,7 @@ class QueryPooling(nn.Module):
     def __init__(self, channels: int, k: int) -> None:
         super().__init__()
         self.k = int(k)
-        self.scale = channels ** -0.5
+        self.scale = channels**-0.5
         self.queries = nn.Parameter(torch.randn(self.k, channels))
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -165,7 +167,9 @@ class SequenceCNNEncoder(nn.Module):
             feats.append(pos)
         if inputs.edit_mask is not None:
             feats.append(
-                _ensure_float(inputs.edit_mask, device=target_device, dtype=target_dtype)
+                _ensure_float(
+                    inputs.edit_mask, device=target_device, dtype=target_dtype
+                )
             )
         if inputs.gap_mask is not None:
             feats.append(

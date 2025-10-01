@@ -56,9 +56,7 @@ def build_sequence_datasets(
             f"total={total_dim}"
         )
         if ds.use_protein:
-            print(
-                f"[dataset] {split}: protein_coverage={ds.protein_coverage:.3f}"
-            )
+            print(f"[dataset] {split}: protein_coverage={ds.protein_coverage:.3f}")
     return datasets
 
 

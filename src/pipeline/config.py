@@ -140,7 +140,9 @@ class PipelineConfig:
 
     def __post_init__(self) -> None:
         if not self.dna.enabled and not self.protein.enabled:
-            raise ConfigError("At least one of DNA or Protein processing must be enabled")
+            raise ConfigError(
+                "At least one of DNA or Protein processing must be enabled"
+            )
 
         if self.protein.enabled:
             missing: list[str] = []

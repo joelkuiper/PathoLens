@@ -430,7 +430,7 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
     x0 = x0 if isinstance(x0, np.ndarray) else x0.numpy()
     finite = np.isfinite(x0)
     print(
-        f"[SMOKE] First feature vector: shape={tuple(x0.shape)}  finite%={(finite.mean()*100):.2f}%  "
+        f"[SMOKE] First feature vector: shape={tuple(x0.shape)}  finite%={(finite.mean() * 100):.2f}%  "
         f"min={np.nanmin(x0):.4f}  max={np.nanmax(x0):.4f}"
     )
 
@@ -448,12 +448,11 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     D_prot = int(train_split.D_prot)
     cond_spec = getattr(train_split, "cond_spec", None)
     if cond_spec is None:
-        raise RuntimeError("SequenceTowerDataset must expose 'cond_spec' for projector build")
+        raise RuntimeError(
+            "SequenceTowerDataset must expose 'cond_spec' for projector build"
+        )
     D_cond = int(cond_spec.get("total_dim", D_eff + D_prot))
-    print(
-        "[INFO] LLM pipeline: "
-        f"D_cond={D_cond} (eff={D_eff} prot={D_prot})"
-    )
+    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
 
     # build model with matching projector input
     tok, base_model, projector = build_qwen_with_lora(cfg, cond_spec)

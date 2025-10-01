@@ -760,7 +760,6 @@ def ensure_vep_annotations(
 
 
 def main():
-
     ap = argparse.ArgumentParser(
         description="Run VEP on a ClinVar-like DataFrame using Docker or a local binary"
     )

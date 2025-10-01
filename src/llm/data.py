@@ -137,12 +137,9 @@ def make_collator(
         attn_mask = enc_full["attention_mask"]
         labels = input_ids.clone()
 
-        prompt_lens = [
-            int(x) for x in enc_prompt["attention_mask"].sum(dim=1).tolist()
-        ]
+        prompt_lens = [int(x) for x in enc_prompt["attention_mask"].sum(dim=1).tolist()]
         pad_lens = [
-            int(x)
-            for x in (input_ids.shape[1] - attn_mask.sum(dim=1)).tolist()
+            int(x) for x in (input_ids.shape[1] - attn_mask.sum(dim=1)).tolist()
         ]
         label_starts = [pad + prompt for pad, prompt in zip(pad_lens, prompt_lens)]
 

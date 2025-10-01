@@ -51,6 +51,7 @@ def initialise_sequence_archive(
     chunk = max(1, min(int(chunk_rows), int(n_rows))) if n_rows else 1
 
     with h5py.File(path, "w") as h5:
+
         def create_dataset(name: str, shape: Tuple[int, ...], dtype: str, *, fillvalue):
             h5.create_dataset(
                 name,

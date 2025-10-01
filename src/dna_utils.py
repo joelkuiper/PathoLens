@@ -44,7 +44,9 @@ def sanitize(seq: str) -> str:
     return "".join(c if c in IUPAC_VALID else "N" for c in s)
 
 
-def _center_crop_sequence(seq: str, center: int, target_len: int) -> tuple[str, int, int]:
+def _center_crop_sequence(
+    seq: str, center: int, target_len: int
+) -> tuple[str, int, int]:
     """Crop ``seq`` to ``target_len`` characters centred on ``center``.
 
     Returns ``(cropped_seq, new_center, offset)`` where ``offset`` is the number
@@ -260,8 +262,7 @@ def load_dna_archive(
     if seq_len != seq_len_attr:
         handle.close()
         raise ValueError(
-            "DNA archive seq_len mismatch: "
-            f"stored={seq_len_attr} actual={seq_len}"
+            f"DNA archive seq_len mismatch: stored={seq_len_attr} actual={seq_len}"
         )
 
     embed_dim = int(datasets["ref_tokens"].shape[2])
@@ -298,7 +299,14 @@ def compute_dna_slices(
         offset += L * E
         slices["alt_tokens"] = slice(offset, offset + L * E)
         offset += L * E
-        for key in ("ref_mask", "alt_mask", "edit_mask", "gap_mask", "splice_mask", "pos"):
+        for key in (
+            "ref_mask",
+            "alt_mask",
+            "edit_mask",
+            "gap_mask",
+            "splice_mask",
+            "pos",
+        ):
             slices[key] = slice(offset, offset + L)
             offset += L
     block_stop = offset
@@ -315,8 +323,12 @@ def write_dna_features(
 
     if slices is None:
         return
-    dest[slices["ref_tokens"]] = datasets["ref_tokens"][idx].astype("float32").reshape(-1)
-    dest[slices["alt_tokens"]] = datasets["alt_tokens"][idx].astype("float32").reshape(-1)
+    dest[slices["ref_tokens"]] = (
+        datasets["ref_tokens"][idx].astype("float32").reshape(-1)
+    )
+    dest[slices["alt_tokens"]] = (
+        datasets["alt_tokens"][idx].astype("float32").reshape(-1)
+    )
     dest[slices["ref_mask"]] = datasets["ref_mask"][idx].astype("float32")
     dest[slices["alt_mask"]] = datasets["alt_mask"][idx].astype("float32")
     dest[slices["edit_mask"]] = datasets["edit_mask"][idx].astype("float32")
@@ -458,7 +470,8 @@ def process_and_cache_dna(
             )
             if int(seq_len_meta) == int(target_seq_len):
                 too_long = any(
-                    len(str(seq)) > target_seq_len for seq in ref_seqs[: min(8, len(ref_seqs))]
+                    len(str(seq)) > target_seq_len
+                    for seq in ref_seqs[: min(8, len(ref_seqs))]
                 )
                 if too_long:
                     print(
@@ -572,7 +585,9 @@ def process_and_cache_dna(
         tok, enc, device = build_dna_encoder(dna_model_id, max_length, device)
         seq_len = max(1, min(int(target_seq_len), int(tok.model_max_length) - 1))
         if seq_len <= 0:
-            raise RuntimeError("Tokenizer max length too small to build sequence tensors")
+            raise RuntimeError(
+                "Tokenizer max length too small to build sequence tensors"
+            )
         D = enc.get_input_embeddings().embedding_dim
         N = len(ref_seqs)
         ref_seqs = [str(s) for s in ref_seqs]

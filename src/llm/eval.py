@@ -128,10 +128,7 @@ def evaluate_split_batched(
         D_eff = int(getattr(train_split, "D_eff", 0))
         D_prot = int(getattr(train_split, "D_prot", 0))
         D_cond = D_eff + D_prot
-    print(
-        "[INFO] Eval: "
-        f"D_cond={D_cond} (eff={D_eff} prot={D_prot})"
-    )
+    print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
 
     tok, model = load_finetuned_model(model_id, D_cond, adapter_dir, projector_path)
     enable_fast_generate(model, tok)

@@ -70,7 +70,9 @@ class SequenceTowerDataset(Dataset):
         if not self.use_protein:
             protein_h5 = None
         if not self.use_dna and not self.use_protein:
-            raise ValueError("SequenceTowerDataset requires at least one modality enabled")
+            raise ValueError(
+                "SequenceTowerDataset requires at least one modality enabled"
+            )
 
         # ---- DNA embeddings ----
         self._dna_archive_handle = None
@@ -108,7 +110,8 @@ class SequenceTowerDataset(Dataset):
         self._labels = None
         if self.make_label:
             label_series = pd.to_numeric(
-                self.meta[self.label_col], errors="raise",
+                self.meta[self.label_col],
+                errors="raise",
             )
             if label_series.isna().any():
                 raise ValueError(

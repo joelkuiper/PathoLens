@@ -177,8 +177,7 @@ def load_protein_archive(
     if missing:
         handle.close()
         raise KeyError(
-            "Protein archive missing keys: "
-            f"{sorted(missing)} | found={sorted(keys)}"
+            f"Protein archive missing keys: {sorted(missing)} | found={sorted(keys)}"
         )
 
     seq_len_attr = handle.attrs.get("seq_len")
@@ -202,8 +201,7 @@ def load_protein_archive(
     if seq_len != seq_len_attr:
         handle.close()
         raise ValueError(
-            "Protein archive seq_len mismatch: "
-            f"stored={seq_len_attr} actual={seq_len}"
+            f"Protein archive seq_len mismatch: stored={seq_len_attr} actual={seq_len}"
         )
 
     embed_dim = int(datasets["wt_tokens"].shape[2])
@@ -225,8 +223,7 @@ def validate_protein_indices(indices: np.ndarray, total_rows: int) -> float:
     prot_max = int(indices.max(initial=-1))
     if prot_max >= total_rows:
         raise RuntimeError(
-            "protein_embedding_idx out of range "
-            f"(max={prot_max}, N={total_rows})"
+            f"protein_embedding_idx out of range (max={prot_max}, N={total_rows})"
         )
 
     covered = int((indices >= 0).sum())
@@ -248,7 +245,14 @@ def compute_protein_slices(
         offset += L * E
         slices["mt_tokens"] = slice(offset, offset + L * E)
         offset += L * E
-        for key in ("wt_mask", "mt_mask", "edit_mask", "gap_mask", "frameshift_mask", "pos"):
+        for key in (
+            "wt_mask",
+            "mt_mask",
+            "edit_mask",
+            "gap_mask",
+            "frameshift_mask",
+            "pos",
+        ):
             slices[key] = slice(offset, offset + L)
             offset += L
     block_stop = offset
@@ -368,6 +372,8 @@ def encode_sequence_tokens(
     out = out[:, 1:, :]
     attn = attn[:, 1:]
     return out.to(torch.float32), attn.to(torch.float32)
+
+
 # ============================================================
 # Embedding (unique dedupe + interleaved schedule + memmap)
 # ============================================================
@@ -811,7 +817,9 @@ def process_and_cache_protein(
         indices = list(range(N))
         wt_seqs = [str(s) for s in kept["seq_wt"].tolist()]
         mt_seqs = [str(s) for s in kept["seq_mt"].tolist()]
-        edit_indices = [min(max(int(edit_positions[i]), 0), seq_len - 1) for i in range(N)]
+        edit_indices = [
+            min(max(int(edit_positions[i]), 0), seq_len - 1) for i in range(N)
+        ]
         base_pos = np.arange(seq_len, dtype=np.float16)
 
         if not archive_prepared:
@@ -876,12 +884,8 @@ def process_and_cache_protein(
                 )
                 wt_attn = attn[:bsz]
                 mt_attn = attn[bsz:]
-                wt_mask_batch = (
-                    wt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
-                )
-                mt_mask_batch = (
-                    mt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
-                )
+                wt_mask_batch = wt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
+                mt_mask_batch = mt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
                 gap_batch = (
                     torch.logical_xor(wt_attn.bool(), mt_attn.bool())
                     .to(dtype=torch.uint8)
@@ -946,14 +950,14 @@ def process_and_cache_protein(
             f"Protein archive {out_h5_path} is marked incomplete; regenerate the embeddings."
         )
     if N != len(kept):
-        raise RuntimeError(
-            f"Alignment mismatch: arrays N={N} vs kept N={len(kept)}"
-        )
+        raise RuntimeError(f"Alignment mismatch: arrays N={N} vs kept N={len(kept)}")
 
     # Always (re)write meta so it matches whatever we embedded
     write_protein_meta(kept, out_meta)
     print(f"[protein][meta] wrote {out_meta} rows={len(kept)}")
     return kept, str(out_h5_path)
+
+
 def batch_iter(xs: List[int], bs: int):
     buf: List[int] = []
     for x in xs:
@@ -963,5 +967,3 @@ def batch_iter(xs: List[int], bs: int):
             buf = []
     if buf:
         yield list(buf)
-
-

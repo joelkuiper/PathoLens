@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -116,7 +116,9 @@ class CondProjector(nn.Module):
         tokens: list[torch.Tensor] = []
 
         if self.dna_encoder is not None:
-            dna_inputs = self._build_sequence_inputs(x, self.spec["dna"], modality="dna")
+            dna_inputs = self._build_sequence_inputs(
+                x, self.spec["dna"], modality="dna"
+            )
             dna_tokens = self.dna_encoder(dna_inputs)
             tokens.append(dna_tokens)
 
@@ -225,7 +227,9 @@ class CondProjector(nn.Module):
 
     @classmethod
     def _serialise_spec(cls, spec: Dict[str, Any]) -> Dict[str, Any]:
-        def _map(section: Optional[Dict[str, slice]]) -> Optional[Dict[str, tuple[int, int]]]:
+        def _map(
+            section: Optional[Dict[str, slice]],
+        ) -> Optional[Dict[str, tuple[int, int]]]:
             if section is None:
                 return None
             return {k: cls._slice_to_tuple(v) for k, v in section.items()}
@@ -242,7 +246,9 @@ class CondProjector(nn.Module):
                 "seq_len": int(spec.get("protein", {}).get("seq_len", 0)),
                 "embed_dim": int(spec.get("protein", {}).get("embed_dim", 0)),
                 "slices": _map(spec.get("protein", {}).get("slices")),
-                "extra_masks": list(spec.get("protein", {}).get("extra_masks", []) or []),
+                "extra_masks": list(
+                    spec.get("protein", {}).get("extra_masks", []) or []
+                ),
             },
         }
 
@@ -266,7 +272,9 @@ class CondProjector(nn.Module):
                 "seq_len": int(cfg.get("protein", {}).get("seq_len", 0)),
                 "embed_dim": int(cfg.get("protein", {}).get("embed_dim", 0)),
                 "slices": None,
-                "extra_masks": list(cfg.get("protein", {}).get("extra_masks", []) or []),
+                "extra_masks": list(
+                    cfg.get("protein", {}).get("extra_masks", []) or []
+                ),
             },
         }
         dna_slices_cfg = cfg.get("dna", {}).get("slices")

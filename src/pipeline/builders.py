@@ -14,7 +14,9 @@ from .config import PipelineConfig
 from .manifest import SplitArtifact
 
 
-def _ensure_variation_key(df: pd.DataFrame, *, column: str = "variation_key") -> pd.DataFrame:
+def _ensure_variation_key(
+    df: pd.DataFrame, *, column: str = "variation_key"
+) -> pd.DataFrame:
     if column in df.columns:
         return df
     if "VariationID" not in df.columns:
@@ -70,9 +72,7 @@ def build_dna_caches(
             )
             kept_df = _ensure_variation_key(kept_df)
             if "dna_embedding_idx" not in kept_df.columns:
-                kept_df["dna_embedding_idx"] = np.arange(
-                    len(kept_df), dtype=np.int32
-                )
+                kept_df["dna_embedding_idx"] = np.arange(len(kept_df), dtype=np.int32)
             kept_df = kept_df.reset_index(drop=True)
             kept_df.to_feather(meta_path)
 
@@ -142,7 +142,9 @@ def build_protein_caches(
                 raise FileNotFoundError(
                     f"VEP output for split '{split}' not found at {combined_feather}"
                 )
-            print(f"[protein] using existing VEP output for {split}: {combined_feather}")
+            print(
+                f"[protein] using existing VEP output for {split}: {combined_feather}"
+            )
         else:
             combined_feather = vep_dir / "vep_combined.feather"
             if combined_feather.exists() and not cfg.protein.force_vep:
@@ -212,8 +214,8 @@ def build_protein_caches(
         )
 
         if "protein_embedding_idx" in merged.columns:
-            merged["protein_embedding_idx"] = merged["protein_embedding_idx"].fillna(-1).astype(
-                np.int32
+            merged["protein_embedding_idx"] = (
+                merged["protein_embedding_idx"].fillna(-1).astype(np.int32)
             )
         else:
             merged["protein_embedding_idx"] = np.full(len(merged), -1, dtype=np.int32)
