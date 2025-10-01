@@ -269,14 +269,70 @@ def write_protein_features(
 
     if slices is None or idx < 0:
         return
-    dest[slices["wt_tokens"]] = datasets["wt_tokens"][idx].astype("float32").reshape(-1)
-    dest[slices["mt_tokens"]] = datasets["mt_tokens"][idx].astype("float32").reshape(-1)
-    dest[slices["wt_mask"]] = datasets["wt_mask"][idx].astype("float32")
-    dest[slices["mt_mask"]] = datasets["mt_mask"][idx].astype("float32")
-    dest[slices["edit_mask"]] = datasets["edit_mask"][idx].astype("float32")
-    dest[slices["gap_mask"]] = datasets["gap_mask"][idx].astype("float32")
-    dest[slices["frameshift_mask"]] = datasets["frameshift_mask"][idx].astype("float32")
-    dest[slices["pos"]] = datasets["pos"][idx].astype("float32").reshape(-1)
+
+    required_keys = (
+        "wt_tokens",
+        "mt_tokens",
+        "wt_mask",
+        "mt_mask",
+        "edit_mask",
+        "gap_mask",
+        "frameshift_mask",
+        "pos",
+    )
+    missing_slices = [key for key in required_keys if key not in slices]
+    assert not missing_slices, f"Protein feature slices missing: {missing_slices}"
+
+    missing_datasets = [key for key in required_keys if key not in datasets]
+    assert not missing_datasets, f"Protein feature datasets missing: {missing_datasets}"
+
+    wt_tokens_ds = datasets["wt_tokens"]
+    assert 0 <= idx < wt_tokens_ds.shape[0], "Protein WT token index out of range"
+    seq_len = int(wt_tokens_ds.shape[1]) if wt_tokens_ds.ndim >= 2 else 0
+    embed_dim = int(wt_tokens_ds.shape[2]) if wt_tokens_ds.ndim >= 3 else 0
+
+    wt_span = dest[slices["wt_tokens"]]
+    assert wt_span.ndim == 1, "Protein WT token slice should be 1-D"
+    assert wt_span.size == seq_len * embed_dim, "Protein WT token buffer mismatch"
+    wt_dest = wt_span.reshape(seq_len, embed_dim)
+    if wt_dest.size:
+        wt_tokens_ds.read_direct(wt_dest, np.s_[idx, :, :])
+
+    mt_span = dest[slices["mt_tokens"]]
+    assert mt_span.ndim == 1, "Protein MT token slice should be 1-D"
+    assert mt_span.size == seq_len * embed_dim, "Protein MT token buffer mismatch"
+    mt_dest = mt_span.reshape(seq_len, embed_dim)
+    if mt_dest.size:
+        datasets["mt_tokens"].read_direct(mt_dest, np.s_[idx, :, :])
+
+    for key in ("wt_mask", "mt_mask", "edit_mask", "gap_mask", "frameshift_mask"):
+        ds = datasets[key]
+        view = dest[slices[key]]
+        assert view.ndim == 1, f"Protein mask slice '{key}' should be 1-D"
+        assert ds.shape[0] > idx, f"Protein dataset '{key}' index out of range"
+        if ds.ndim >= 2:
+            assert view.size == int(ds.shape[1]), f"Protein mask buffer mismatch for {key}"
+        if view.size:
+            ds.read_direct(view, np.s_[idx, :])
+
+    pos_ds = datasets["pos"]
+    assert pos_ds.shape[0] > idx, "Protein position dataset index out of range"
+    pos_shape = pos_ds.shape[1:]
+    pos_view = dest[slices["pos"]]
+    assert pos_view.ndim == 1, "Protein position slice should be 1-D"
+    if pos_shape:
+        expected = int(np.prod(pos_shape))
+        if expected == pos_view.size:
+            pos_view = pos_view.reshape(pos_shape)
+        else:
+            assert (
+                pos_view.size == 0
+            ), "Protein position buffer must match dataset shape or be empty"
+    if pos_view.size:
+        pos_ds.read_direct(
+            pos_view,
+            (idx,) + (slice(None),) * (pos_ds.ndim - 1),
+        )
 
 
 # ============================================================

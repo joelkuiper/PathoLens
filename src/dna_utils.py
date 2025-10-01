@@ -321,20 +321,72 @@ def write_dna_features(
 ) -> None:
     """Populate ``dest`` with DNA features for ``idx`` if slices are defined."""
 
-    if slices is None:
+    if slices is None or idx < 0:
         return
-    dest[slices["ref_tokens"]] = (
-        datasets["ref_tokens"][idx].astype("float32").reshape(-1)
+
+    required_keys = (
+        "ref_tokens",
+        "alt_tokens",
+        "ref_mask",
+        "alt_mask",
+        "edit_mask",
+        "gap_mask",
+        "splice_mask",
+        "pos",
     )
-    dest[slices["alt_tokens"]] = (
-        datasets["alt_tokens"][idx].astype("float32").reshape(-1)
-    )
-    dest[slices["ref_mask"]] = datasets["ref_mask"][idx].astype("float32")
-    dest[slices["alt_mask"]] = datasets["alt_mask"][idx].astype("float32")
-    dest[slices["edit_mask"]] = datasets["edit_mask"][idx].astype("float32")
-    dest[slices["gap_mask"]] = datasets["gap_mask"][idx].astype("float32")
-    dest[slices["splice_mask"]] = datasets["splice_mask"][idx].astype("float32")
-    dest[slices["pos"]] = datasets["pos"][idx].astype("float32").reshape(-1)
+    missing_slices = [key for key in required_keys if key not in slices]
+    assert not missing_slices, f"DNA feature slices missing: {missing_slices}"
+
+    missing_datasets = [key for key in required_keys if key not in datasets]
+    assert not missing_datasets, f"DNA feature datasets missing: {missing_datasets}"
+
+    ref_tokens_ds = datasets["ref_tokens"]
+    assert 0 <= idx < ref_tokens_ds.shape[0], "DNA ref token index out of range"
+    seq_len = int(ref_tokens_ds.shape[1]) if ref_tokens_ds.ndim >= 2 else 0
+    embed_dim = int(ref_tokens_ds.shape[2]) if ref_tokens_ds.ndim >= 3 else 0
+
+    ref_span = dest[slices["ref_tokens"]]
+    assert ref_span.ndim == 1, "DNA ref token slice should be 1-D"
+    assert ref_span.size == seq_len * embed_dim, "DNA ref token buffer mismatch"
+    ref_dest = ref_span.reshape(seq_len, embed_dim)
+    if ref_dest.size:
+        ref_tokens_ds.read_direct(ref_dest, np.s_[idx, :, :])
+
+    alt_span = dest[slices["alt_tokens"]]
+    assert alt_span.ndim == 1, "DNA alt token slice should be 1-D"
+    assert alt_span.size == seq_len * embed_dim, "DNA alt token buffer mismatch"
+    alt_dest = alt_span.reshape(seq_len, embed_dim)
+    if alt_dest.size:
+        datasets["alt_tokens"].read_direct(alt_dest, np.s_[idx, :, :])
+
+    for key in ("ref_mask", "alt_mask", "edit_mask", "gap_mask", "splice_mask"):
+        ds = datasets[key]
+        view = dest[slices[key]]
+        assert view.ndim == 1, f"DNA mask slice '{key}' should be 1-D"
+        assert ds.shape[0] > idx, f"DNA dataset '{key}' index out of range"
+        if ds.ndim >= 2:
+            assert view.size == int(ds.shape[1]), f"DNA mask buffer mismatch for {key}"
+        if view.size:
+            ds.read_direct(view, np.s_[idx, :])
+
+    pos_ds = datasets["pos"]
+    assert pos_ds.shape[0] > idx, "DNA position dataset index out of range"
+    pos_shape = pos_ds.shape[1:]
+    pos_view = dest[slices["pos"]]
+    assert pos_view.ndim == 1, "DNA position slice should be 1-D"
+    if pos_shape:
+        expected = int(np.prod(pos_shape))
+        if expected == pos_view.size:
+            pos_view = pos_view.reshape(pos_shape)
+        else:
+            assert (
+                pos_view.size == 0
+            ), "DNA position buffer must match dataset shape or be empty"
+    if pos_view.size:
+        pos_ds.read_direct(
+            pos_view,
+            (idx,) + (slice(None),) * (pos_ds.ndim - 1),
+        )
 
 
 # ---------------------------
