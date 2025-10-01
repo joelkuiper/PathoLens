@@ -1,6 +1,6 @@
 # src/dna_utils.py
 from __future__ import annotations
-from typing import Iterable, Tuple, Optional, List
+from typing import Iterable, Tuple, Optional, List, Dict, Mapping
 
 import math
 
@@ -198,6 +198,131 @@ def batch_iter(xs: Iterable, bs: int):
             buf = []
     if buf:
         yield buf
+
+
+# ---------------------------
+# HDF5 archive helpers
+# ---------------------------
+
+_DNA_REQUIRED_KEYS = {
+    "dna_ref_tokens",
+    "dna_alt_tokens",
+    "dna_ref_mask",
+    "dna_alt_mask",
+    "dna_edit_mask",
+    "dna_gap_mask",
+    "dna_pos",
+    "dna_splice_mask",
+}
+
+
+def load_dna_archive(
+    dna_h5: str,
+) -> tuple[h5py.File, Dict[str, h5py.Dataset], int, int]:
+    """Open ``dna_h5`` and validate the expected datasets are present."""
+
+    dna_path = Path(dna_h5)
+    if dna_path.suffix.lower() not in {".h5", ".hdf5"}:
+        raise ValueError(
+            f"DNA archive must be an HDF5 file (.h5/.hdf5); got '{dna_path}'"
+        )
+    try:
+        handle = h5py.File(dna_path, "r")
+    except Exception as exc:  # pragma: no cover - file errors are environmental
+        raise RuntimeError(f"Failed to open DNA archive '{dna_h5}': {exc}") from exc
+
+    keys = set(handle.keys())
+    missing = _DNA_REQUIRED_KEYS - keys
+    if missing:
+        handle.close()
+        raise KeyError(
+            f"DNA archive missing keys: {sorted(missing)} | found={sorted(keys)}"
+        )
+
+    seq_len_attr = handle.attrs.get("seq_len")
+    if seq_len_attr is None:
+        handle.close()
+        raise KeyError("DNA archive missing 'seq_len' attribute")
+
+    datasets: Dict[str, h5py.Dataset] = {
+        "ref_tokens": handle["dna_ref_tokens"],
+        "alt_tokens": handle["dna_alt_tokens"],
+        "ref_mask": handle["dna_ref_mask"],
+        "alt_mask": handle["dna_alt_mask"],
+        "edit_mask": handle["dna_edit_mask"],
+        "gap_mask": handle["dna_gap_mask"],
+        "pos": handle["dna_pos"],
+        "splice_mask": handle["dna_splice_mask"],
+    }
+
+    seq_len = int(datasets["ref_tokens"].shape[1])
+    seq_len_attr = int(seq_len_attr)
+    if seq_len != seq_len_attr:
+        handle.close()
+        raise ValueError(
+            "DNA archive seq_len mismatch: "
+            f"stored={seq_len_attr} actual={seq_len}"
+        )
+
+    embed_dim = int(datasets["ref_tokens"].shape[2])
+
+    return handle, datasets, seq_len, embed_dim
+
+
+def validate_dna_indices(indices: np.ndarray, total_rows: int) -> None:
+    """Ensure ``indices`` reference valid rows in the DNA archive."""
+
+    if indices.size == 0:
+        return
+    dna_min = int(indices.min(initial=0))
+    dna_max = int(indices.max(initial=-1))
+    if dna_min < 0 or dna_max >= total_rows:
+        raise RuntimeError(
+            "dna_embedding_idx out of range "
+            f"(min={dna_min}, max={dna_max}, N={total_rows})"
+        )
+
+
+def compute_dna_slices(
+    seq_len: int, embed_dim: int, offset: int
+) -> tuple[Optional[Dict[str, slice]], slice, int]:
+    """Return the layout slices for DNA conditioning vectors."""
+
+    block_start = offset
+    slices: Optional[Dict[str, slice]] = None
+    if seq_len > 0 and embed_dim > 0:
+        L = seq_len
+        E = embed_dim
+        slices = {}
+        slices["ref_tokens"] = slice(offset, offset + L * E)
+        offset += L * E
+        slices["alt_tokens"] = slice(offset, offset + L * E)
+        offset += L * E
+        for key in ("ref_mask", "alt_mask", "edit_mask", "gap_mask", "splice_mask", "pos"):
+            slices[key] = slice(offset, offset + L)
+            offset += L
+    block_stop = offset
+    return slices, slice(block_start, block_stop), offset
+
+
+def write_dna_features(
+    dest: np.ndarray,
+    slices: Optional[Mapping[str, slice]],
+    idx: int,
+    datasets: Mapping[str, h5py.Dataset],
+) -> None:
+    """Populate ``dest`` with DNA features for ``idx`` if slices are defined."""
+
+    if slices is None:
+        return
+    dest[slices["ref_tokens"]] = datasets["ref_tokens"][idx].astype("float32").reshape(-1)
+    dest[slices["alt_tokens"]] = datasets["alt_tokens"][idx].astype("float32").reshape(-1)
+    dest[slices["ref_mask"]] = datasets["ref_mask"][idx].astype("float32")
+    dest[slices["alt_mask"]] = datasets["alt_mask"][idx].astype("float32")
+    dest[slices["edit_mask"]] = datasets["edit_mask"][idx].astype("float32")
+    dest[slices["gap_mask"]] = datasets["gap_mask"][idx].astype("float32")
+    dest[slices["splice_mask"]] = datasets["splice_mask"][idx].astype("float32")
+    dest[slices["pos"]] = datasets["pos"][idx].astype("float32").reshape(-1)
 
 
 # ---------------------------

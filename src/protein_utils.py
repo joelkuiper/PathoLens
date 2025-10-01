@@ -1,6 +1,6 @@
 # src/protein_utils.py
 from __future__ import annotations
-from typing import Tuple, Optional, List, Dict
+from typing import Tuple, Optional, List, Dict, Mapping
 from difflib import SequenceMatcher
 import os
 from pathlib import Path
@@ -137,6 +137,142 @@ def _infer_alignment_indices(wt: str, mt: str) -> tuple[int, int]:
     center_wt = len_wt // 2
     center_mt = min(center_wt, len_mt - 1)
     return center_wt, center_mt
+
+
+# ---------------------------
+# HDF5 archive helpers
+# ---------------------------
+
+_PROTEIN_REQUIRED_KEYS = {
+    "prot_wt_tokens",
+    "prot_mt_tokens",
+    "prot_wt_mask",
+    "prot_mt_mask",
+    "prot_edit_mask",
+    "prot_gap_mask",
+    "prot_pos",
+    "prot_frameshift_mask",
+}
+
+
+def load_protein_archive(
+    protein_h5: str,
+) -> tuple[h5py.File, Dict[str, h5py.Dataset], int, int]:
+    """Open ``protein_h5`` and validate the expected datasets are present."""
+
+    prot_path = Path(protein_h5)
+    if prot_path.suffix.lower() not in {".h5", ".hdf5"}:
+        raise ValueError(
+            f"Protein archive must be an HDF5 file (.h5/.hdf5); got '{prot_path}'"
+        )
+    try:
+        handle = h5py.File(protein_h5, "r")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to open protein archive '{protein_h5}': {exc}"
+        ) from exc
+
+    keys = set(handle.keys())
+    missing = _PROTEIN_REQUIRED_KEYS - keys
+    if missing:
+        handle.close()
+        raise KeyError(
+            "Protein archive missing keys: "
+            f"{sorted(missing)} | found={sorted(keys)}"
+        )
+
+    seq_len_attr = handle.attrs.get("seq_len")
+    if seq_len_attr is None:
+        handle.close()
+        raise KeyError("Protein archive missing 'seq_len' attribute")
+
+    datasets: Dict[str, h5py.Dataset] = {
+        "wt_tokens": handle["prot_wt_tokens"],
+        "mt_tokens": handle["prot_mt_tokens"],
+        "wt_mask": handle["prot_wt_mask"],
+        "mt_mask": handle["prot_mt_mask"],
+        "edit_mask": handle["prot_edit_mask"],
+        "gap_mask": handle["prot_gap_mask"],
+        "pos": handle["prot_pos"],
+        "frameshift_mask": handle["prot_frameshift_mask"],
+    }
+
+    seq_len = int(datasets["wt_tokens"].shape[1])
+    seq_len_attr = int(seq_len_attr)
+    if seq_len != seq_len_attr:
+        handle.close()
+        raise ValueError(
+            "Protein archive seq_len mismatch: "
+            f"stored={seq_len_attr} actual={seq_len}"
+        )
+
+    embed_dim = int(datasets["wt_tokens"].shape[2])
+
+    return handle, datasets, seq_len, embed_dim
+
+
+def validate_protein_indices(indices: np.ndarray, total_rows: int) -> float:
+    """Ensure ``indices`` reference valid rows in the protein archive."""
+
+    if (indices < -1).any():
+        raise RuntimeError("protein_embedding_idx must be -1 or non-negative integers")
+
+    if total_rows == 0 and (indices >= 0).any():
+        raise RuntimeError(
+            "protein_embedding_idx refers to embeddings but protein tokens array is empty"
+        )
+
+    prot_max = int(indices.max(initial=-1))
+    if prot_max >= total_rows:
+        raise RuntimeError(
+            "protein_embedding_idx out of range "
+            f"(max={prot_max}, N={total_rows})"
+        )
+
+    covered = int((indices >= 0).sum())
+    return covered / max(1, len(indices))
+
+
+def compute_protein_slices(
+    seq_len: int, embed_dim: int, offset: int
+) -> tuple[Optional[Dict[str, slice]], slice, int]:
+    """Return the layout slices for protein conditioning vectors."""
+
+    block_start = offset
+    slices: Optional[Dict[str, slice]] = None
+    if seq_len > 0 and embed_dim > 0:
+        L = seq_len
+        E = embed_dim
+        slices = {}
+        slices["wt_tokens"] = slice(offset, offset + L * E)
+        offset += L * E
+        slices["mt_tokens"] = slice(offset, offset + L * E)
+        offset += L * E
+        for key in ("wt_mask", "mt_mask", "edit_mask", "gap_mask", "frameshift_mask", "pos"):
+            slices[key] = slice(offset, offset + L)
+            offset += L
+    block_stop = offset
+    return slices, slice(block_start, block_stop), offset
+
+
+def write_protein_features(
+    dest: np.ndarray,
+    slices: Optional[Mapping[str, slice]],
+    idx: int,
+    datasets: Mapping[str, h5py.Dataset],
+) -> None:
+    """Populate ``dest`` with protein features for ``idx`` if available."""
+
+    if slices is None or idx < 0:
+        return
+    dest[slices["wt_tokens"]] = datasets["wt_tokens"][idx].astype("float32").reshape(-1)
+    dest[slices["mt_tokens"]] = datasets["mt_tokens"][idx].astype("float32").reshape(-1)
+    dest[slices["wt_mask"]] = datasets["wt_mask"][idx].astype("float32")
+    dest[slices["mt_mask"]] = datasets["mt_mask"][idx].astype("float32")
+    dest[slices["edit_mask"]] = datasets["edit_mask"][idx].astype("float32")
+    dest[slices["gap_mask"]] = datasets["gap_mask"][idx].astype("float32")
+    dest[slices["frameshift_mask"]] = datasets["frameshift_mask"][idx].astype("float32")
+    dest[slices["pos"]] = datasets["pos"][idx].astype("float32").reshape(-1)
 
 
 # ============================================================
