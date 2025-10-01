@@ -1,13 +1,10 @@
 # src/dna_utils.py
 from __future__ import annotations
-from typing import Iterable, Tuple, Optional, List
-
-import math
+from typing import Iterable, Tuple, Optional, List, Dict, Any, Sequence
 
 import os
 from pathlib import Path
 
-import h5py
 import numpy as np
 import pandas as pd
 import torch
@@ -15,25 +12,6 @@ from pyfaidx import Fasta
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModel
 from util import get_device
-
-from src.sequence_cache import (
-    SequenceArchiveLayout,
-    ensure_h5_path,
-    initialise_sequence_archive,
-    open_sequence_archive,
-)
-
-# Layout describing DNA HDF5 dataset names
-DNA_ARCHIVE_LAYOUT = SequenceArchiveLayout(
-    wt_tokens="dna_ref_tokens",
-    mt_tokens="dna_alt_tokens",
-    wt_mask="dna_ref_mask",
-    mt_mask="dna_alt_mask",
-    edit_mask="dna_edit_mask",
-    gap_mask="dna_gap_mask",
-    pos="dna_pos",
-    extra_masks=("dna_splice_mask",),
-)
 
 # ----- constants for the “toy but stable” setup -----
 IUPAC_VALID = set("ACGTN")
@@ -85,20 +63,59 @@ def build_dna_encoder(
     model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g",
     max_length: int = 512,
     device: Optional[str] = None,
+    revision: Optional[str] = None,
 ):
     device = device or get_device()
+    load_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+    if revision:
+        load_kwargs["revision"] = revision
+
     tok = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True, use_fast=False
+        model_id,
+        use_fast=False,
+        **load_kwargs,
     )
     if tok.pad_token is None:
         tok.add_special_tokens({"pad_token": tok.unk_token or tok.eos_token or "[PAD]"})
     tok.padding_side = "right"
     tok.model_max_length = max_length
 
-    torch_dtype = torch.bfloat16 if device == "cuda" else torch.float32
-    enc = AutoModel.from_pretrained(
-        model_id, trust_remote_code=True, torch_dtype=torch_dtype
-    )
+    dev_str = device.type if isinstance(device, torch.device) else str(device)
+    dev_str = dev_str.lower()
+    prefer_dtype = torch.bfloat16 if dev_str.startswith("cuda") else torch.float32
+
+    def _load_model_for_dtype(target_dtype: torch.dtype) -> torch.nn.Module:
+        model_kwargs = dict(load_kwargs)
+        try:
+            return AutoModel.from_pretrained(
+                model_id,
+                dtype=target_dtype,
+                **model_kwargs,
+            )
+        except TypeError:
+            # transformers<4.45 fallback where ``dtype`` arg unsupported
+            model_kwargs.pop("dtype", None)
+            model_kwargs["torch_dtype"] = target_dtype
+            return AutoModel.from_pretrained(
+                model_id,
+                **model_kwargs,
+            )
+
+    try:
+        enc = _load_model_for_dtype(prefer_dtype)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "size mismatch" in msg:
+            raise RuntimeError(
+                "Failed to load DNA encoder weights due to a size mismatch. "
+                "Pin a specific checkpoint revision in the pipeline config to "
+                "match the tokenizer."
+            ) from exc
+        if prefer_dtype != torch.float32:
+            enc = _load_model_for_dtype(torch.float32)
+        else:
+            raise
+
     if enc.get_input_embeddings().num_embeddings < len(tok):
         enc.resize_token_embeddings(len(tok))
     # cap to position embeddings if present
@@ -200,6 +217,204 @@ def batch_iter(xs: Iterable, bs: int):
         yield buf
 
 
+class DNAConditioningStreamer:
+    """Helper that lazily encodes DNA conditioning tensors on demand."""
+
+    def __init__(
+        self,
+        *,
+        tokenizer,
+        model,
+        device,
+        seq_len: int,
+        embed_dim: int,
+        batch_size: int,
+        records: Dict[int, Dict[str, Any]],
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.model = model
+        self.device = device
+        self.seq_len = int(seq_len)
+        self.embed_dim = int(embed_dim)
+        self.batch_size = max(1, int(batch_size))
+        self.records = records
+        self._base_pos = np.arange(self.seq_len, dtype="float32")
+
+    def encode(self, indices: Sequence[int]) -> Dict[int, Dict[str, np.ndarray]]:
+        if self.seq_len <= 0 or self.embed_dim <= 0:
+            return {}
+
+        valid = [int(i) for i in indices if int(i) in self.records]
+        if not valid:
+            return {}
+
+        outputs: Dict[int, Dict[str, np.ndarray]] = {}
+        max_len = self.seq_len + 1
+
+        for start in range(0, len(valid), self.batch_size):
+            chunk = valid[start : start + self.batch_size]
+            chunk_records = [self.records[i] for i in chunk]
+
+            ref_batch = [rec["ref_seq"] for rec in chunk_records]
+            alt_batch = [rec["alt_seq"] for rec in chunk_records]
+            edit_batch = [int(rec["edit_idx"]) for rec in chunk_records]
+
+            ref_hidden, ref_attn = encode_sequence_tokens(
+                ref_batch,
+                self.model,
+                self.tokenizer,
+                self.device,
+                max_length=max_len,
+            )
+            alt_hidden, alt_attn = encode_sequence_tokens(
+                alt_batch,
+                self.model,
+                self.tokenizer,
+                self.device,
+                max_length=max_len,
+            )
+
+            ref_hidden = ref_hidden[:, : self.seq_len, :].to(torch.float32).cpu().numpy()
+            alt_hidden = alt_hidden[:, : self.seq_len, :].to(torch.float32).cpu().numpy()
+            ref_attn = ref_attn[:, : self.seq_len].to(torch.float32).cpu().numpy()
+            alt_attn = alt_attn[:, : self.seq_len].to(torch.float32).cpu().numpy()
+            gap = np.logical_xor(ref_attn > 0, alt_attn > 0).astype("float32")
+
+            for j, arr_idx in enumerate(chunk):
+                edit_pos = min(max(int(edit_batch[j]), 0), self.seq_len - 1)
+                edit_vec = np.zeros((self.seq_len,), dtype="float32")
+                if self.seq_len > 0:
+                    edit_vec[edit_pos] = 1.0
+
+                splice_mask = chunk_records[j].get("splice_mask")
+                if splice_mask is None:
+                    splice_arr = np.zeros((self.seq_len,), dtype="float32")
+                else:
+                    splice_arr = np.zeros((self.seq_len,), dtype="float32")
+                    src = np.asarray(splice_mask, dtype="float32").reshape(-1)
+                    take = min(len(src), self.seq_len)
+                    if take > 0:
+                        splice_arr[:take] = src[:take]
+
+                outputs[arr_idx] = {
+                    "ref_tokens": ref_hidden[j],
+                    "alt_tokens": alt_hidden[j],
+                    "ref_mask": ref_attn[j],
+                    "alt_mask": alt_attn[j],
+                    "edit_mask": edit_vec,
+                    "gap_mask": gap[j],
+                    "pos": (self._base_pos - float(edit_pos))[:, None],
+                    "splice_mask": splice_arr,
+                }
+
+        return outputs
+
+    def empty(self) -> Dict[str, np.ndarray]:
+        zeros_2d = np.zeros((self.seq_len, self.embed_dim), dtype="float32")
+        zeros_1d = np.zeros((self.seq_len,), dtype="float32")
+        return {
+            "ref_tokens": zeros_2d,
+            "alt_tokens": zeros_2d,
+            "ref_mask": zeros_1d,
+            "alt_mask": zeros_1d,
+            "edit_mask": zeros_1d,
+            "gap_mask": zeros_1d,
+            "pos": np.zeros((self.seq_len, 1), dtype="float32"),
+            "splice_mask": zeros_1d,
+        }
+
+
+def encode_dna_conditioning(
+    meta: pd.DataFrame,
+    *,
+    model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g",
+    revision: Optional[str] = None,
+    max_length: int = 384,
+    batch_size: int = 16,
+    device: Optional[str] = None,
+) -> DNAConditioningStreamer:
+    """Prepare a streamer that lazily encodes DNA conditioning tensors."""
+
+    required = {
+        "dna_ref_seq",
+        "dna_alt_seq",
+        "dna_edit_idx",
+        "dna_seq_len",
+        "dna_embedding_idx",
+    }
+    missing = [col for col in required if col not in meta.columns]
+    if missing:
+        raise KeyError(
+            "Metadata frame missing DNA sequence columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    extra_cols: list[str] = []
+    if "dna_splice_mask" in meta.columns:
+        extra_cols.append("dna_splice_mask")
+
+    uniq = (
+        meta[meta["dna_embedding_idx"] >= 0][list(required) + extra_cols]
+        .drop_duplicates("dna_embedding_idx")
+        .sort_values("dna_embedding_idx")
+    )
+
+    if uniq.empty:
+        tok, enc, run_device = build_dna_encoder(
+            model_id=model_id,
+            max_length=max_length,
+            device=device,
+            revision=revision,
+        )
+        enc.eval()
+        return DNAConditioningStreamer(
+            tokenizer=tok,
+            model=enc,
+            device=run_device,
+            seq_len=0,
+            embed_dim=0,
+            batch_size=batch_size,
+            records={},
+        )
+
+    seq_len = int(uniq["dna_seq_len"].iloc[0])
+    tok, enc, run_device = build_dna_encoder(
+        model_id=model_id,
+        max_length=max_length,
+        device=device,
+        revision=revision,
+    )
+    seq_len = max(1, min(seq_len, int(tok.model_max_length) - 1))
+    embed_dim = int(enc.get_input_embeddings().embedding_dim)
+
+    records: Dict[int, Dict[str, Any]] = {}
+    has_splice = "dna_splice_mask" in uniq.columns
+
+    for row in uniq.itertuples(index=False):
+        arr_idx = int(row.dna_embedding_idx)
+        rec: Dict[str, Any] = {
+            "ref_seq": str(row.dna_ref_seq),
+            "alt_seq": str(row.dna_alt_seq),
+            "edit_idx": int(row.dna_edit_idx),
+        }
+        if has_splice:
+            mask = getattr(row, "dna_splice_mask")
+            if isinstance(mask, (list, tuple, np.ndarray)):
+                arr = np.asarray(mask, dtype="float32")
+                rec["splice_mask"] = arr[:seq_len]
+        records[arr_idx] = rec
+
+    return DNAConditioningStreamer(
+        tokenizer=tok,
+        model=enc,
+        device=run_device,
+        seq_len=seq_len,
+        embed_dim=embed_dim,
+        batch_size=batch_size,
+        records=records,
+    )
+
+
 # ---------------------------
 # Post-processing & I/O
 # ---------------------------
@@ -283,30 +498,29 @@ def load_windows_feather(
 
 
 # ---------------------------
-# Orchestrator (with caching)
+# Orchestrator (metadata only)
 # ---------------------------
-def process_and_cache_dna(
+def process_dna_sequences(
     df: pd.DataFrame,
     fasta: Fasta,
     *,
     window: int,
-    batch_size: int = 16,
     max_length: int,
     out_meta: str = "out/clinvar_dna.feather",
-    out_h5: str = "out/dna_embeddings.h5",
     windows_meta: str | None = None,
-    device: Optional[str] = None,
     limit: Optional[int] = None,
-    dna_model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g",
     force_windows: bool = False,
-    force_embeddings: bool = False,
-) -> tuple[pd.DataFrame, str]:
-    os.makedirs(os.path.dirname(out_meta), exist_ok=True)
-    out_h5_path = ensure_h5_path(out_h5, kind="DNA")
+) -> pd.DataFrame:
+    """
+    Prepare DNA reference/alternate windows and accompanying metadata.
+
+    This replaces the old caching pipeline by returning a dataframe containing
+    the sequences required for downstream embedding.
+    """
+
     if limit:
         df = df.iloc[:limit].copy()
 
-    # A) windows cache
     if windows_meta is None:
         stem = os.path.splitext(os.path.basename(out_meta))[0]
         windows_meta = os.path.join(
@@ -391,6 +605,7 @@ def process_and_cache_dna(
 
         start_positions = start_adj
         end_positions = end_adj
+        os.makedirs(os.path.dirname(windows_meta), exist_ok=True)
         write_windows_feather(
             kept_df,
             ref_seqs,
@@ -412,181 +627,8 @@ def process_and_cache_dna(
                 min(target_seq_len // 2, max(len(seq) - 1, 0)) for seq in ref_seqs
             ]
 
-    # B) embeddings cache
-    need_embed = True
-    required = {
-        "dna_ref_tokens",
-        "dna_alt_tokens",
-        "dna_ref_mask",
-        "dna_alt_mask",
-        "dna_edit_mask",
-        "dna_gap_mask",
-        "dna_pos",
-        "dna_splice_mask",
-    }
-    if os.path.exists(out_h5_path) and not force_embeddings:
-        try:
-            with h5py.File(out_h5_path, "r") as store:
-                keys = set(store.keys())
-                if required.issubset(keys):
-                    same_rows = store["dna_ref_tokens"].shape[0] == len(kept_df)
-                    stored_seq_len = int(store.attrs.get("seq_len", -1))
-                    same_len = stored_seq_len == target_seq_len
-                    completed = int(store.attrs.get("complete", 0)) == 1
-                    need_embed = not (same_rows and same_len and completed)
-                else:
-                    need_embed = True
-            if not need_embed:
-                print(
-                    f"[dna][embeddings] reuse {out_h5_path} rows={len(kept_df)} force={force_embeddings}"
-                )
-        except Exception:
-            need_embed = True
-
-    if need_embed:
-        tok, enc, device = build_dna_encoder(dna_model_id, max_length, device)
-        seq_len = max(1, min(int(target_seq_len), int(tok.model_max_length) - 1))
-        if seq_len <= 0:
-            raise RuntimeError("Tokenizer max length too small to build sequence tensors")
-        D = enc.get_input_embeddings().embedding_dim
-        N = len(ref_seqs)
-        ref_seqs = [str(s) for s in ref_seqs]
-        alt_seqs = [str(s) for s in alt_seqs]
-        edit_positions = [int(e) for e in edit_positions]
-        edit_indices = [min(max(int(idx), 0), seq_len - 1) for idx in edit_positions]
-        base_pos = np.arange(seq_len, dtype="float16")
-        batch_rows = max(1, int(batch_size))
-        initialise_sequence_archive(
-            out_h5_path,
-            layout=DNA_ARCHIVE_LAYOUT,
-            n_rows=N,
-            seq_len=seq_len,
-            embed_dim=D,
-            chunk_rows=batch_rows,
-            kind="DNA",
-        )
-
-        with open_sequence_archive(
-            out_h5_path, layout=DNA_ARCHIVE_LAYOUT, kind="DNA"
-        ) as archive:
-            ref_tokens_ds = archive.wt_tokens
-            alt_tokens_ds = archive.mt_tokens
-            ref_mask_ds = archive.wt_mask
-            alt_mask_ds = archive.mt_mask
-            edit_mask_ds = archive.edit_mask
-            gap_mask_ds = archive.gap_mask
-            pos_ds = archive.pos
-            splice_mask_ds = archive.extra_masks.get("dna_splice_mask")
-
-            total_batches = max(1, math.ceil(N / max(int(batch_size), 1)))
-            for chunk in tqdm(
-                batch_iter(list(range(N)), batch_size),
-                total=total_batches,
-                desc="[dna][embeddings] batches",
-                unit="batch",
-            ):
-                idxs = list(chunk)
-                idxs_arr = np.array(idxs, dtype=np.int64)
-                ref_batch = [ref_seqs[i] for i in idxs_arr]
-                alt_batch = [alt_seqs[i] for i in idxs_arr]
-
-                ref_hidden, ref_attn = encode_sequence_tokens(
-                    ref_batch, enc, tok, device, max_length=seq_len + 1
-                )
-                alt_hidden, alt_attn = encode_sequence_tokens(
-                    alt_batch, enc, tok, device, max_length=seq_len + 1
-                )
-
-                ref_hidden = (
-                    ref_hidden[:, :seq_len, :]
-                    .to(dtype=torch.float16)
-                    .cpu()
-                    .contiguous()
-                    .numpy()
-                )
-                alt_hidden = (
-                    alt_hidden[:, :seq_len, :]
-                    .to(dtype=torch.float16)
-                    .cpu()
-                    .contiguous()
-                    .numpy()
-                )
-                ref_attn = ref_attn[:, :seq_len]
-                alt_attn = alt_attn[:, :seq_len]
-                ref_mask_batch = (
-                    ref_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
-                )
-                alt_mask_batch = (
-                    alt_attn.to(dtype=torch.uint8).cpu().contiguous().numpy()
-                )
-                gap_batch = (
-                    torch.logical_xor(ref_attn.bool(), alt_attn.bool())
-                    .to(dtype=torch.uint8)
-                    .cpu()
-                    .contiguous()
-                    .numpy()
-                )
-
-                bsz = len(idxs_arr)
-                edit_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
-                pos_batch = np.zeros((bsz, seq_len, 1), dtype=np.float16)
-                splice_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
-                for j, row_idx in enumerate(idxs_arr):
-                    idx = edit_indices[row_idx]
-                    edit_batch[j, idx] = 1
-                    pos_batch[j, :, 0] = base_pos - np.float16(idx)
-
-                if bsz and np.all(np.diff(idxs_arr) == 1):
-                    start = int(idxs_arr[0])
-                    end = start + bsz
-                    ref_tokens_ds[start:end, :, :] = ref_hidden
-                    alt_tokens_ds[start:end, :, :] = alt_hidden
-                    ref_mask_ds[start:end, :] = ref_mask_batch
-                    alt_mask_ds[start:end, :] = alt_mask_batch
-                    edit_mask_ds[start:end, :] = edit_batch
-                    gap_mask_ds[start:end, :] = gap_batch
-                    pos_ds[start:end, :, :] = pos_batch
-                    if splice_mask_ds is not None:
-                        splice_mask_ds[start:end, :] = splice_batch
-                else:
-                    ref_tokens_ds[idxs_arr, :, :] = ref_hidden
-                    alt_tokens_ds[idxs_arr, :, :] = alt_hidden
-                    ref_mask_ds[idxs_arr, :] = ref_mask_batch
-                    alt_mask_ds[idxs_arr, :] = alt_mask_batch
-                    edit_mask_ds[idxs_arr, :] = edit_batch
-                    gap_mask_ds[idxs_arr, :] = gap_batch
-                    pos_ds[idxs_arr, :, :] = pos_batch
-                    if splice_mask_ds is not None:
-                        splice_mask_ds[idxs_arr, :] = splice_batch
-
-                archive.flush()
-
-            archive.store.attrs["complete"] = 1
-            archive.flush()
-        print(f"[dna][embeddings] wrote {out_h5_path} rows={len(kept_df)}")
-
-    # C) final meta aligned to arrays
-    with h5py.File(out_h5_path, "r") as store:
-        missing = required - set(store.keys())
-        if missing:
-            raise RuntimeError(f"{out_h5_path} missing keys: {sorted(missing)}")
-        N = store["dna_ref_tokens"].shape[0]
-        seq_len_stored = int(store.attrs.get("seq_len", -1))
-        completed = int(store.attrs.get("complete", 0))
-    if N != len(kept_df):
-        raise RuntimeError(
-            f"Alignment mismatch: arrays N={N} vs kept_df N={len(kept_df)}"
-        )
-    if seq_len_stored != target_seq_len:
-        raise RuntimeError(
-            f"DNA archive seq_len mismatch: stored={seq_len_stored} expected={target_seq_len}"
-        )
-    if completed != 1:
-        raise RuntimeError(
-            f"DNA archive {out_h5_path} is marked incomplete; regenerate the embeddings."
-        )
     kept_df = kept_df.copy()
-    kept_df["dna_embedding_idx"] = np.arange(N, dtype=np.int32)
+    kept_df["dna_embedding_idx"] = np.arange(len(kept_df), dtype=np.int32)
     kept_df["dna_ref_seq"] = list(ref_seqs)
     kept_df["dna_alt_seq"] = list(alt_seqs)
     if start_positions:
@@ -597,5 +639,5 @@ def process_and_cache_dna(
     kept_df["dna_fasta_path"] = str(fasta_path)
     kept_df["dna_edit_idx"] = list(int(x) for x in edit_positions)
     kept_df["dna_seq_len"] = int(target_seq_len)
-    print(f"[dna][meta] prepared frame rows={N}")
-    return kept_df, str(out_h5_path)
+    print(f"[dna][meta] prepared frame rows={len(kept_df)}")
+    return kept_df

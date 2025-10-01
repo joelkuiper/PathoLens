@@ -14,30 +14,32 @@ from .manifest import PipelineManifest
 def build_sequence_datasets(
     cfg: PipelineConfig,
     manifest: PipelineManifest,
-    *,
     make_label: bool = True,
     label_col: str = "_y",
 ) -> Dict[str, SequenceTowerDataset]:
     datasets: Dict[str, SequenceTowerDataset] = {}
     go_npz = manifest.go_npz
     for split, artifact in manifest.splits.items():
-        if not artifact.meta or not artifact.dna_h5:
-            raise ValueError(f"Manifest entry for '{split}' missing DNA artifacts")
-        if not artifact.protein_h5:
-            raise ValueError(
-                f"Manifest entry for '{split}' missing protein artifacts"
-            )
+        if not artifact.meta:
+            raise ValueError(f"Manifest entry for '{split}' missing metadata path")
         frame = pd.read_feather(artifact.meta)
 
         ds = SequenceTowerDataset(
             meta_df=frame,
-            dna_h5=artifact.dna_h5,
             go_npz=go_npz,
             make_label=make_label,
             label_col=label_col,
-            protein_h5=artifact.protein_h5,
             go_normalize=cfg.go.normalize,
             go_uppercase=cfg.go.uppercase_keys,
+            dna_model_id=cfg.dna.model_id,
+            dna_model_revision=cfg.dna.revision,
+            dna_max_length=cfg.dna.max_length,
+            dna_batch_size=cfg.dna.batch_size,
+            protein_model_id=cfg.protein.model_id,
+            protein_model_revision=cfg.protein.revision,
+            protein_max_length=cfg.protein.max_length,
+            protein_batch_size=cfg.protein.batch_size,
+            device=cfg.run.device,
         )
         datasets[split] = ds
         total_dim = ds.dna_dim + ds.go_dim + ds.protein_dim
