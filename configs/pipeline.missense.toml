@@ -12,7 +12,7 @@ fasta = "data/raw/GCF_000001405.40_GRCh38.p14_genomic.fna"
 artifacts = "artifacts/missense"
 
 [DNA]
-enabled = true
+enabled = false
 model_id = "InstaDeepAI/nucleotide-transformer-500m-1000g"
 window = 128
 max_length = 384
@@ -22,8 +22,8 @@ force_embeddings = false
 
 [Protein]
 enabled = true
-model_id = "facebook/esm2_t12_35M_UR50D"
-batch_size = 8
+model_id = "facebook/esm2_t30_150M_UR50D"
+batch_size = 32
 # ``window`` is the target length (residues) for the centered protein slice
 window = 127
 max_length = 2048
@@ -48,8 +48,8 @@ per_device_bs = 16
 grad_accum = 8
 lr = 0.0003
 seed = 42
-num_workers = 0
-prefetch_factor = 2
+num_workers = 16
+prefetch_factor = 4
 persistent_workers = false
 pin_memory = true
 group_by_length = false
