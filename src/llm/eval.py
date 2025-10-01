@@ -9,6 +9,7 @@ import re
 import numpy as np
 import torch
 from typing import List, Dict, Any, Optional, Tuple
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from src.llm.config import PROMPT_TMPL, BIN_LABELS
@@ -60,6 +61,87 @@ def _sha10(s: str) -> str:
 
 
 # -----------------------
+# Eval dataset + collator
+# -----------------------
+
+
+class _EvalDataset(Dataset):
+    """Lightweight dataset to feed batched evaluation."""
+
+    def __init__(
+        self,
+        seq_split: Any,
+        indices: List[int],
+        cond_dim: int,
+    ) -> None:
+        self.seq_split = seq_split
+        self.meta = seq_split.meta
+        self.indices = list(indices)
+        self.cond_dim = int(cond_dim or 0)
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self.indices)
+
+    def __getitem__(self, item: int) -> Dict[str, Any]:
+        idx = self.indices[item]
+        x, *_ = self.seq_split[idx]
+        if isinstance(x, torch.Tensor):
+            arr = x.detach().cpu().numpy()
+        else:
+            arr = np.asarray(x)
+        arr = arr.astype(np.float32, copy=False)
+        cond_vec = arr[: self.cond_dim] if self.cond_dim else arr
+
+        meta_row = self.meta.iloc[idx]
+
+        if getattr(self.seq_split, "_force_blank_prompts", False):
+            prompt_text = getattr(
+                self.seq_split,
+                "_force_blank_prompt_template",
+                PROMPT_TMPL.format(ctx=""),
+            )
+        else:
+            ctx = build_ctx_from_row(meta_row)
+            prompt_text = PROMPT_TMPL.format(ctx=ctx)
+
+        if "_y" not in meta_row:
+            raise KeyError("Evaluation dataset requires '_y' in metadata.")
+        label = int(meta_row["_y"])
+
+        return {"cond_vec": cond_vec, "prompt": prompt_text, "label": label}
+
+
+def _eval_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    conds = torch.from_numpy(
+        np.stack([b["cond_vec"] for b in batch]).astype(np.float32)
+    )
+    prompts = [str(b["prompt"]) for b in batch]
+    labels = torch.tensor([int(b["label"]) for b in batch], dtype=torch.long)
+    return {"cond_vec": conds, "prompts": prompts, "labels": labels}
+
+
+def _build_eval_loader(
+    dataset: _EvalDataset,
+    *,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+) -> DataLoader:
+    loader_kwargs: Dict[str, Any] = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "collate_fn": _eval_collate_fn,
+        "num_workers": num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "drop_last": False,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = True
+    return DataLoader(dataset, **loader_kwargs)
+
+
+# -----------------------
 # Main evaluator (compat with eval_old)
 # -----------------------
 @torch.inference_mode()
@@ -70,6 +152,8 @@ def evaluate_split_batched(
     model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
     max_n: Optional[int] = None,
     batch_size: int = 64,
+    num_workers: int = 0,
+    prefetch_factor: int = 2,
 ) -> Dict[str, Any]:
     """
     IMPORTANT: We do NOT insert ground-truth anywhere into the prompt or scoring.
@@ -150,36 +234,24 @@ def evaluate_split_batched(
         "Pathogenic": encode_label_variants(tok, "Pathogenic"),
     }
 
+    eval_dataset = _EvalDataset(ds, idxs, D_cond)
+    loader = _build_eval_loader(
+        eval_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+    )
+
     y_true: List[int] = []
     y_pred: List[int] = []
     prob_pathogenic: List[float] = []
 
     # Batched scoring — matches eval_old path
-    for bi in tqdm(range(0, N, batch_size), desc=f"Scoring [{split}]", unit="batch"):
-        batch_idxs = idxs[bi : bi + batch_size]
+    for batch in tqdm(loader, desc=f"Scoring [{split}]", unit="batch"):
+        prompts = batch["prompts"]
+        conds = batch["cond_vec"]
+        y_batch = batch["labels"].tolist()
 
-        # Build prompts/conds WITHOUT ground-truth
-        prompts, conds, y_batch = [], [], []
-        for i in batch_idxs:
-            x, *_ = ds[i]
-            conds.append(x.numpy())
-
-            # normal context build
-            ctx = build_ctx_from_row(ds.meta.iloc[i])
-
-            if getattr(ds, "_force_blank_prompts", False):
-                prompt_text = getattr(
-                    ds,
-                    "_force_blank_prompt_template",
-                    PROMPT_TMPL.format(ctx=""),
-                )
-            else:
-                prompt_text = PROMPT_TMPL.format(ctx=ctx)
-
-            prompts.append(prompt_text)
-            y_batch.append(int(ds.meta.iloc[i]["_y"]))
-
-        conds = np.stack(conds, axis=0)
         inp_emb, attn = prepare_prompt_embeddings(model, tok, prompts, conds)
 
         lp_b = score_label_word_logprobs(
@@ -277,6 +349,7 @@ def run_all(
     max_n_val: Optional[int] = None,
     max_n_test: Optional[int] = None,
     batch_size: int = 64,
+    num_workers: int = 8,
 ):
     res_val = evaluate_split_batched(
         seq_ds,
@@ -285,6 +358,7 @@ def run_all(
         model_id=model_id,
         max_n=max_n_val,
         batch_size=batch_size,
+        num_workers=num_workers,
     )
     print("\nVAL metrics:")
     print(
@@ -309,6 +383,7 @@ def run_all(
         model_id=model_id,
         max_n=max_n_test,
         batch_size=batch_size,
+        num_workers=num_workers,
     )
     print("\nTEST metrics:")
     print(
