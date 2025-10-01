@@ -1,4 +1,2 @@
 https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz
 https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz
-https://current.geneontology.org/annotations/goa_human.gaf.gz
-https://purl.obolibrary.org/obo/go.json

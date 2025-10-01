@@ -290,7 +290,6 @@ def main() -> None:
             else list(filter_consequences)
         )
     manifest = PipelineManifest(
-        go_npz=str(cfg.go.npz),
         splits=manifest_splits,
         extras=manifest_extras,
     )

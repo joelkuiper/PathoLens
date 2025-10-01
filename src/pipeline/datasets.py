@@ -19,7 +19,6 @@ def build_sequence_datasets(
     label_col: str = "_y",
 ) -> Dict[str, SequenceTowerDataset]:
     datasets: Dict[str, SequenceTowerDataset] = {}
-    go_npz = manifest.go_npz
     for split, artifact in manifest.splits.items():
         if not artifact.meta or not artifact.dna_h5:
             raise ValueError(f"Manifest entry for '{split}' missing DNA artifacts")
@@ -32,22 +31,18 @@ def build_sequence_datasets(
         ds = SequenceTowerDataset(
             meta_df=frame,
             dna_h5=artifact.dna_h5,
-            go_npz=go_npz,
             make_label=make_label,
             label_col=label_col,
             protein_h5=artifact.protein_h5,
-            go_normalize=cfg.go.normalize,
-            go_uppercase=cfg.go.uppercase_keys,
         )
         datasets[split] = ds
-        total_dim = ds.dna_dim + ds.go_dim + ds.protein_dim
+        total_dim = ds.dna_dim + ds.protein_dim
         print(
-            f"[dataset] {split}: rows={len(ds)} dim(dna={ds.dna_dim}, go={ds.go_dim}, "
-            f"protein={ds.protein_dim}) total={total_dim}"
+            f"[dataset] {split}: rows={len(ds)} dim(dna={ds.dna_dim}, protein={ds.protein_dim}) "
+            f"total={total_dim}"
         )
         print(
-            f"[dataset] {split}: GO_hit_rate={ds.go_hit_rate:.3f} "
-            f"protein_coverage={ds.protein_coverage:.3f}"
+            f"[dataset] {split}: protein_coverage={ds.protein_coverage:.3f}"
         )
     return datasets
 

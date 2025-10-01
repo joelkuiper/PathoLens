@@ -7,7 +7,6 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from src.go.gene_go_embeddings import GeneGOEmbeddings
 from src.dna_utils import (
     compute_dna_slices,
     load_dna_archive,
@@ -23,7 +22,7 @@ from src.protein_utils import (
 
 
 class SequenceTowerDataset(Dataset):
-    """Dataset that concatenates DNA, GO, and protein embeddings."""
+    """Dataset that concatenates DNA and protein embeddings."""
 
     def __init__(
         self,
@@ -31,12 +30,9 @@ class SequenceTowerDataset(Dataset):
         meta_df: Optional[pd.DataFrame] = None,
         meta_feather: Optional[str] = None,
         dna_h5: str,
-        go_npz: Optional[str] = None,
         make_label: bool = True,
         label_col: str = "_y",
         protein_h5: str,
-        go_normalize: bool = True,
-        go_uppercase: bool = True,
         schema: Optional[Mapping[str, str]] = None,
     ) -> None:
         if meta_df is None:
@@ -74,16 +70,6 @@ class SequenceTowerDataset(Dataset):
             raise ValueError("dna_embedding_idx column contains missing values")
         self._dna_idx = dna_idx_series.to_numpy(dtype=np.int64)
 
-        # Pre-compute uppercase gene names once for GO lookups
-        gene_series = self.meta.get(
-            "GeneSymbol",
-            pd.Series(index=self.meta.index, data="", dtype="string"),
-        )
-        gene_series = gene_series.astype("string").fillna("")
-        self._gene_values = gene_series.tolist()
-        self._gene_upper = gene_series.str.upper().tolist()
-        self._gene_lookup = list(self._gene_upper)
-
         # ---- DNA embeddings ----
         (
             self._dna_archive_handle,
@@ -95,39 +81,6 @@ class SequenceTowerDataset(Dataset):
         self.D_eff = 0
         self.dna_dim = 0
         validate_dna_indices(self._dna_idx, N_full)
-
-        # ---- GO embeddings ----
-        self.go = None
-        self.D_go = 0
-        self.go_dim = 0
-        self._go_vectors: Optional[np.ndarray] = None
-        self.go_hit_rate = 0.0
-        if go_npz:
-            try:
-                go_embed = GeneGOEmbeddings(
-                    go_npz, normalize=go_normalize, uppercase_keys=go_uppercase
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to load GO embeddings from '{go_npz}': {exc}"
-                ) from exc
-
-            self.go = go_embed
-            self.D_go = int(go_embed.dim)
-            self.go_dim = self.D_go
-            if self.D_go > 0:
-                gene_lookup = (
-                    self._gene_upper
-                    if getattr(go_embed, "uppercase", True)
-                    else self._gene_values
-                )
-                self._gene_lookup = list(gene_lookup)
-                self._go_vectors = np.asarray(
-                    go_embed.batch(self._gene_lookup), dtype="float32"
-                )
-                go_hits = sum(1 for g in self._gene_lookup if go_embed.has(g))
-                total_genes = len(self._gene_lookup)
-                self.go_hit_rate = go_hits / max(1, total_genes)
 
         # ---- labels ----
         self.make_label = bool(make_label)
@@ -173,10 +126,6 @@ class SequenceTowerDataset(Dataset):
         self.D_eff = dna_block_slice.stop - dna_block_slice.start
         self.dna_dim = self.D_eff
 
-        go_slice = slice(offset, offset + self.D_go)
-        self.cond_slices["go"] = go_slice
-        offset = go_slice.stop
-
         prot_slices, prot_block_slice, offset = compute_protein_slices(
             self.prot_seq_len, self.prot_embed_dim, offset
         )
@@ -207,7 +156,6 @@ class SequenceTowerDataset(Dataset):
                 "slices": prot_slices,
                 "extra_masks": prot_extra,
             },
-            "go": {"slice": go_slice if self.D_go > 0 else None, "dim": self.D_go},
             "total_dim": self.total_dim,
         }
 
@@ -224,11 +172,6 @@ class SequenceTowerDataset(Dataset):
         if dna_slice is not None:
             dna_idx = int(self._dna_idx[idx])
             write_dna_features(x_np, dna_slice, dna_idx, self._dna_datasets)
-
-        go_slice = self.cond_slices.get("go")
-        if go_slice is not None and self.D_go > 0:
-            if self._go_vectors is not None:
-                x_np[go_slice] = self._go_vectors[idx].astype("float32")
 
         prot_slice = self.cond_slices.get("protein")
         if prot_slice is not None and self.D_prot > 0:

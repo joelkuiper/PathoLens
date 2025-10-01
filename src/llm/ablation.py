@@ -422,13 +422,10 @@ def run_prompt_vs_cond_ablation(
     cond_spec = getattr(train_split, "cond_spec", None)
     if cond_spec:
         dna_bounds = _block_bounds(cond_spec.get("dna"))
-        go_bounds = _block_bounds(cond_spec.get("go"))
         prot_bounds = _block_bounds(cond_spec.get("protein"))
         D_eff = _range_len(dna_bounds)
-        D_go = _range_len(go_bounds)
         D_prot = _range_len(prot_bounds)
         dna_range = dna_bounds if D_eff > 0 else None
-        go_range = go_bounds if D_go > 0 else None
         prot_range = prot_bounds if D_prot > 0 else None
     else:
         raise ValueError("Expected cond_spec")
@@ -470,20 +467,6 @@ def run_prompt_vs_cond_ablation(
             batch_size=batch_size,
         )
         results["cond_zero_dna"] = out
-
-    # --- cond_zero_go (zero only GO features) ---
-    if go_range is not None:
-        go_start, go_end = go_range
-        print("\n[ABL] cond_zero_go (conditioning: zero GO block)")
-        view_zero_go = _with_cond_zero_ranges(seq_ds, [(go_start, go_end)])
-        out = evaluate_split_batched(
-            view_zero_go,
-            out_dir=out_dir,
-            split=split,
-            max_n=max_n,
-            batch_size=batch_size,
-        )
-        results["cond_zero_go"] = out
 
     # --- cond_zero_prot (zero only protein features) ---
     if prot_range is not None:
@@ -619,7 +602,6 @@ def run_prompt_vs_cond_ablation(
         "cond_only",
         "cond_zero_dna",
         "cond_zero_prot",
-        "cond_zero_go",
         "prompt_only",
         "prompt_no_hgvsp",
         "prompt_no_hgvsc",

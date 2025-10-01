@@ -373,10 +373,9 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
     # --- Conditioning dims from training dataset ---
     ds_tr = seq_ds_dict["train"]
     D_eff = int(getattr(ds_tr, "D_eff"))
-    D_go = int(getattr(ds_tr, "D_go", 0) or 0)
     D_prot = int(getattr(ds_tr, "D_prot", 0) or 0)
-    D_cond = D_eff + D_go + D_prot
-    print(f"[SMOKE] D_eff={D_eff}  D_go={D_go}  D_prot={D_prot}  → D_cond={D_cond}")
+    D_cond = D_eff + D_prot
+    print(f"[SMOKE] D_eff={D_eff}  D_prot={D_prot}  → D_cond={D_cond}")
 
     # --- Special tokens must be single ids ---
     def _single_id(token: str) -> int:
@@ -443,18 +442,17 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     out_dir.mkdir(parents=True, exist_ok=True)
     set_all_seeds(cfg.seed)
 
-    # Compute conditioning dim from dataset (DNA + GO + protein)
+    # Compute conditioning dim from dataset (DNA + protein)
     train_split = seq_ds["train"]
     D_eff = int(train_split.D_eff)
-    D_go = int(getattr(train_split, "D_go", 0) or 0)
     D_prot = int(train_split.D_prot)
     cond_spec = getattr(train_split, "cond_spec", None)
     if cond_spec is None:
         raise RuntimeError("SequenceTowerDataset must expose 'cond_spec' for projector build")
-    D_cond = int(cond_spec.get("total_dim", D_eff + D_go + D_prot))
+    D_cond = int(cond_spec.get("total_dim", D_eff + D_prot))
     print(
         "[INFO] LLM pipeline: "
-        f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
+        f"D_cond={D_cond} (eff={D_eff} prot={D_prot})"
     )
 
     # build model with matching projector input

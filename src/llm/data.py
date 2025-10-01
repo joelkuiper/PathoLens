@@ -26,7 +26,7 @@ class CondDataset(Dataset):
     Builds conditioning vectors from SequenceTowerDataset samples.
 
     Assumes each sample returns:
-        v, *_  where v packs  [ dna_features | go_vec | protein_features ]
+        v, *_  where v packs  [ dna_features | protein_features ]
 
     The conditioning span is derived from the sequence dataset's ``cond_spec``
     so the dataset always follows the canonical block layout.
@@ -54,20 +54,18 @@ class CondDataset(Dataset):
             raise TypeError(f"Unexpected slice type in cond_spec: {type(value)!r}")
 
         dna_info = spec.get("dna", {})
-        go_info = spec.get("go", {})
         prot_info = spec.get("protein", {})
 
         self.D_dna = _slice_len(dna_info.get("slice"))
-        self.D_go = int(go_info.get("dim") or _slice_len(go_info.get("slice")))
         self.D_prot = _slice_len(prot_info.get("slice"))
         self.D_cond = int(spec.get("total_dim", 0))
         if self.D_cond <= 0:
             # Fallback to explicit sum if total_dim missing or zero
-            self.D_cond = self.D_dna + self.D_go + self.D_prot
+            self.D_cond = self.D_dna + self.D_prot
 
         print(
             "[DEBUG] CondDataset: "
-            f"D_dna={self.D_dna} D_go={self.D_go} D_prot={self.D_prot} "
+            f"D_dna={self.D_dna} D_prot={self.D_prot} "
             f"=> D_cond={self.D_cond} | Build time: {time.time() - t0:.2f}s"
         )
 

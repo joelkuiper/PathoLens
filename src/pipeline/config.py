@@ -53,11 +53,10 @@ def _norm_path(value: Any, base: Optional[Path] = None) -> Path:
 class PathsConfig:
     clinvar: Path
     fasta: Path
-    go: Path
     artifacts: Path
 
     def __post_init__(self) -> None:
-        for attr in ("clinvar", "fasta", "go", "artifacts"):
+        for attr in ("clinvar", "fasta", "artifacts"):
             val = getattr(self, attr)
             if not isinstance(val, Path):
                 setattr(self, attr, Path(str(val)))
@@ -93,13 +92,6 @@ class ProteinConfig:
 
 
 @dataclass
-class GOConfig:
-    npz: Path
-    normalize: bool = True
-    uppercase_keys: bool = True
-
-
-@dataclass
 class LLMRunConfig:
     enabled: bool = True
     out_dir: Path = Path("artifacts/llm")
@@ -119,7 +111,6 @@ class LLMRunConfig:
     balanced_sampling: bool = True
     # Conditioning projector knobs
     n_cond_tokens: int = 12
-    go_tokens: int = 1
     conv_dim: int = 256
     conv_layers: int = 3
     prompt_dropout_prob: float = 0.3
@@ -142,7 +133,6 @@ class PipelineConfig:
     paths: PathsConfig
     dna: DNAConfig = field(default_factory=DNAConfig)
     protein: ProteinConfig = field(default_factory=ProteinConfig)
-    go: GOConfig = field(default_factory=lambda: GOConfig(Path("data/processed/go_n2v_genes.npz")))
     llm: LLMRunConfig = field(default_factory=LLMRunConfig)
     run: RunConfig = field(default_factory=RunConfig)
 
@@ -182,7 +172,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     # without embedding repo-specific directory layouts.
     base = Path.cwd()
     paths_raw = _section(raw, "Paths")
-    required = {"clinvar", "fasta", "go", "artifacts"}
+    required = {"clinvar", "fasta", "artifacts"}
     missing = sorted(required - set(paths_raw))
     if missing:
         raise ConfigError(f"Paths section missing required fields: {missing}")
@@ -190,7 +180,6 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     paths = PathsConfig(
         clinvar=_norm_path(paths_raw["clinvar"], base),
         fasta=_norm_path(paths_raw["fasta"], base),
-        go=_norm_path(paths_raw["go"], base),
         artifacts=_norm_path(paths_raw["artifacts"], base),
     )
 
@@ -210,16 +199,6 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     if protein.vep_cache_dir is not None:
         # ensure normalised
         protein.vep_cache_dir = _norm_path(protein.vep_cache_dir)
-
-    go_raw = _section(raw, "GO")
-    go_npz_val = go_raw.get("npz", paths_raw.get("go"))
-    if go_npz_val is None:
-        raise ConfigError("GO.npz or Paths.go must be provided")
-    go_cfg = GOConfig(
-        npz=_norm_path(go_npz_val, base),
-        normalize=go_raw.get("normalize", True),
-        uppercase_keys=go_raw.get("uppercase_keys", True),
-    )
 
     llm_raw = _section(raw, "LLM")
     llm = LLMRunConfig(
@@ -285,7 +264,6 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         paths=paths,
         dna=dna,
         protein=protein,
-        go=go_cfg,
         llm=llm,
         run=run,
     )

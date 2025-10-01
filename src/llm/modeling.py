@@ -46,7 +46,6 @@ class CondProjector(nn.Module):
         conv_dim: int = 256,
         conv_layers: int = 3,
         p_drop: float = 0.10,
-        go_tokens: int = 1,
     ):
         super().__init__()
         self.spec = dict(spec)
@@ -61,11 +60,9 @@ class CondProjector(nn.Module):
         if self.d_in <= 0:
             raise ValueError("CondProjector requires positive input dimension")
 
-        self._go_tokens_requested = int(go_tokens)
-        self.k_go = 0
         self.k_dna = 0
         self.k_prot = 0
-        self._assign_tokens(self.k_requested, self._go_tokens_requested)
+        self._assign_tokens(self.k_requested)
 
         dna_spec = self.spec.get("dna", {})
         prot_spec = self.spec.get("protein", {})
@@ -99,19 +96,7 @@ class CondProjector(nn.Module):
         else:
             self.protein_encoder = None
 
-        go_dim = int(self.spec.get("go", {}).get("dim", 0) or 0)
-        self.go_proj: Optional[nn.Module]
-        if go_dim > 0 and self.k_go > 0:
-            self.go_proj = nn.Sequential(
-                nn.LayerNorm(go_dim),
-                nn.Linear(go_dim, self.d_out * self.k_go),
-                nn.GELU(),
-                nn.Linear(self.d_out * self.k_go, self.d_out * self.k_go),
-            )
-        else:
-            self.go_proj = None
-
-        self.k = self.k_dna + self.k_prot + self.k_go
+        self.k = self.k_dna + self.k_prot
         if self.k <= 0:
             raise ValueError("CondProjector must emit at least one virtual token")
 
@@ -141,14 +126,6 @@ class CondProjector(nn.Module):
             )
             prot_tokens = self.protein_encoder(prot_inputs)
             tokens.append(prot_tokens)
-
-        if self.go_proj is not None and self.k_go > 0:
-            go_slice = self.spec["go"].get("slice")
-            if go_slice is None:
-                raise RuntimeError("GO projection requested but slice missing in spec")
-            go_vec = x[:, go_slice]
-            go_tokens = self.go_proj(go_vec).view(x.size(0), self.k_go, self.d_out)
-            tokens.append(go_tokens)
 
         if not tokens:
             raise RuntimeError("No conditioning modalities available for CondProjector")
@@ -209,13 +186,10 @@ class CondProjector(nn.Module):
             pos=pos,
         )
 
-    def _assign_tokens(self, k_total: int, go_tokens: int) -> None:
+    def _assign_tokens(self, k_total: int) -> None:
         if k_total <= 0:
             raise ValueError("Number of conditioning tokens must be positive")
-        go_dim = int(self.spec.get("go", {}).get("dim", 0) or 0)
-        has_go = go_dim > 0
-        self.k_go = min(int(go_tokens), k_total) if has_go else 0
-        remaining = k_total - self.k_go
+        remaining = k_total
         has_dna = self.spec.get("dna", {}).get("slices") is not None
         has_prot = self.spec.get("protein", {}).get("slices") is not None
 
@@ -233,14 +207,12 @@ class CondProjector(nn.Module):
             elif has_prot:
                 self.k_prot = remaining
 
-        if self.k_dna + self.k_prot + self.k_go < k_total:
-            leftover = k_total - (self.k_dna + self.k_prot + self.k_go)
+        if self.k_dna + self.k_prot < k_total:
+            leftover = k_total - (self.k_dna + self.k_prot)
             if self.k_dna > 0:
                 self.k_dna += leftover
             elif self.k_prot > 0:
                 self.k_prot += leftover
-            elif self.k_go > 0:
-                self.k_go += leftover
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -272,10 +244,6 @@ class CondProjector(nn.Module):
                 "slices": _map(spec.get("protein", {}).get("slices")),
                 "extra_masks": list(spec.get("protein", {}).get("extra_masks", []) or []),
             },
-            "go": {
-                "slice": cls._slice_to_tuple(spec.get("go", {}).get("slice")),
-                "dim": int(spec.get("go", {}).get("dim", 0)),
-            },
         }
 
     @staticmethod
@@ -299,10 +267,6 @@ class CondProjector(nn.Module):
                 "embed_dim": int(cfg.get("protein", {}).get("embed_dim", 0)),
                 "slices": None,
                 "extra_masks": list(cfg.get("protein", {}).get("extra_masks", []) or []),
-            },
-            "go": {
-                "slice": cls._tuple_to_slice(cfg.get("go", {}).get("slice")),
-                "dim": int(cfg.get("go", {}).get("dim", 0)),
             },
         }
         dna_slices_cfg = cfg.get("dna", {}).get("slices")
@@ -331,7 +295,6 @@ class CondProjector(nn.Module):
             "p_drop": self.p_drop,
             "conv_dim": self.conv_dim,
             "conv_layers": self.conv_layers,
-            "go_tokens": self._go_tokens_requested,
             "d_in": self.d_in,
             "model_cls": self.__class__.__name__,
             "module": self.__class__.__module__,
@@ -451,7 +414,6 @@ def build_qwen_with_lora(cfg, cond_spec: Dict[str, Any]):
 
     hidden = base.config.hidden_size
     n_cond_tokens = getattr(cfg, "n_cond_tokens", 8)
-    go_tokens = getattr(cfg, "go_tokens", 1)
     conv_dim = getattr(cfg, "conv_dim", 256)
     conv_layers = getattr(cfg, "conv_layers", 3)
     base_param = next(base.parameters())
@@ -459,7 +421,6 @@ def build_qwen_with_lora(cfg, cond_spec: Dict[str, Any]):
         spec=cond_spec,
         d_out=hidden,
         k=n_cond_tokens,
-        go_tokens=go_tokens,
         conv_dim=conv_dim,
         conv_layers=conv_layers,
     ).to(device=base_param.device, dtype=base_param.dtype)

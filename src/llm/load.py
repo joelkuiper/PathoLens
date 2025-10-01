@@ -87,7 +87,7 @@ def load_finetuned_model(
             "[LOAD] D_cond mismatch:\n"
             f"        Provided D_cond={D_cond}\n"
             f"        Saved projector expects D_cond={projector.d_in}\n"
-            "        Pass the correct D_cond (e.g., D_eff + D_go + D_prot)."
+            "        Pass the correct D_cond (e.g., D_eff + D_prot)."
         )
 
     emb = model.get_input_embeddings().weight

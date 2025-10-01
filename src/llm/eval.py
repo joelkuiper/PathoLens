@@ -114,26 +114,23 @@ def evaluate_split_batched(
     cond_spec = getattr(train_split, "cond_spec", None)
     if cond_spec:
         dna_bounds = _block_bounds(cond_spec.get("dna"))
-        go_bounds = _block_bounds(cond_spec.get("go"))
         prot_bounds = _block_bounds(cond_spec.get("protein"))
         D_eff = _block_len(dna_bounds)
-        D_go = _block_len(go_bounds)
         D_prot = _block_len(prot_bounds)
-        known_bounds = [b for b in (dna_bounds, go_bounds, prot_bounds) if b]
+        known_bounds = [b for b in (dna_bounds, prot_bounds) if b]
         if known_bounds:
             D_cond = max(stop for _, stop in known_bounds)
         else:
             D_cond = int(getattr(train_split, "total_dim", 0))
         if not D_cond:
-            D_cond = int(getattr(train_split, "total_dim", D_eff + D_go + D_prot))
+            D_cond = int(getattr(train_split, "total_dim", D_eff + D_prot))
     else:
         D_eff = int(getattr(train_split, "D_eff", 0))
-        D_go = int(getattr(train_split, "D_go", 0) or 0)
         D_prot = int(getattr(train_split, "D_prot", 0))
-        D_cond = D_eff + D_go + D_prot
+        D_cond = D_eff + D_prot
     print(
         "[INFO] Eval: "
-        f"D_cond={D_cond} (eff={D_eff} go={D_go} prot={D_prot})"
+        f"D_cond={D_cond} (eff={D_eff} prot={D_prot})"
     )
 
     tok, model = load_finetuned_model(model_id, D_cond, adapter_dir, projector_path)
