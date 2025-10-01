@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
+
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -83,6 +84,26 @@ class CondTrainer(Trainer):
             pin_memory=self.args.dataloader_pin_memory,
             persistent_workers=self.args.dataloader_persistent_workers,
         )
+
+
+class _DeferredSmokeChecks(TrainerCallback):
+    """Run tokenizer-heavy smoke checks only after DataLoader workers fork."""
+
+    def __init__(self, runner: Callable[[], None]):
+        self._runner = runner
+        self._has_run = False
+
+    def on_step_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        if not self._has_run:
+            self._runner()
+            self._has_run = True
+        return control
 
     @staticmethod
     def _first_label_index(label_weights: torch.Tensor) -> torch.Tensor:
@@ -471,7 +492,7 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     )
 
     collator = make_collator(tok, max_len=cfg.max_len)
-    smoke_checks(seq_ds, tok, cfg)
+    smoke_cb = _DeferredSmokeChecks(lambda: smoke_checks(seq_ds, tok, cfg))
 
     sampler = _make_balanced_sampler(train_ds) if cfg.balanced_sampling else None
 
@@ -517,7 +538,7 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=collator,
-        callbacks=[_FirstStepTimerCallback()],
+        callbacks=[_FirstStepTimerCallback(), smoke_cb],
         train_sampler=sampler,
     )
 

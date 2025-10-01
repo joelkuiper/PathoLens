@@ -228,11 +228,12 @@ def evaluate_split_batched(
     if N == 0:
         return {"n": 0, "note": f"No samples in split '{split}'."}
 
-    # Prepare tokenizations for labels once
-    cand = {
-        "Benign": encode_label_variants(tok, "Benign"),
-        "Pathogenic": encode_label_variants(tok, "Pathogenic"),
-    }
+    label_variants_cache: Dict[str, list[list[int]]] = {}
+
+    def _label_variants(label: str) -> list[list[int]]:
+        if label not in label_variants_cache:
+            label_variants_cache[label] = encode_label_variants(tok, label)
+        return label_variants_cache[label]
 
     eval_dataset = _EvalDataset(ds, idxs, D_cond)
     loader = _build_eval_loader(
@@ -260,7 +261,7 @@ def evaluate_split_batched(
             inp_emb,
             attn,
             "Benign",
-            label_variants=cand["Benign"],
+            label_variants=_label_variants("Benign"),
         )
         lp_p = score_label_word_logprobs(
             model,
@@ -268,7 +269,7 @@ def evaluate_split_batched(
             inp_emb,
             attn,
             "Pathogenic",
-            label_variants=cand["Pathogenic"],
+            label_variants=_label_variants("Pathogenic"),
         )
 
         # Two-class normalization → calibrated probability for Pathogenic

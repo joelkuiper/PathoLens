@@ -92,13 +92,16 @@ class CondDataset(Dataset):
 def make_collator(
     tokenizer, max_len: int = 384, label_boost: float = 5.0, mask_think: bool = True
 ):
-    # tiny helpers for label token upweight (optional)
-    tok_B = tokenizer.encode("Benign", add_special_tokens=False)
-    tok_P = tokenizer.encode("Pathogenic", add_special_tokens=False)
+    # Defer tokenizer work until after DataLoader workers fork. Each worker will
+    # populate this cache on demand.
+    _cache: dict[str, list[int]] = {}
 
-    # tokens for <think> and </think>
-    tok_TOPEN = tokenizer.encode("<think>", add_special_tokens=False)
-    tok_TCLOSE = tokenizer.encode("</think>", add_special_tokens=False)
+    def _cached_encode(text: str) -> list[int]:
+        ids = _cache.get(text)
+        if ids is None:
+            ids = tokenizer.encode(text, add_special_tokens=False)
+            _cache[text] = ids
+        return ids
 
     def _find_subseq(where_ids, what_ids, start_at):
         n, m = len(where_ids), len(what_ids)
@@ -115,6 +118,12 @@ def make_collator(
         targets = [
             str(b.get("target", "") or "") for b in batch
         ]  # "Benign"/"Pathogenic"
+
+        # Lazily resolve token ids now that we're inside the worker process.
+        tok_B = _cached_encode("Benign")
+        tok_P = _cached_encode("Pathogenic")
+        tok_TOPEN = _cached_encode("<think>")
+        tok_TCLOSE = _cached_encode("</think>")
 
         prompt_strings, full_strings = build_chat_strings(tokenizer, prompts, targets)
 
