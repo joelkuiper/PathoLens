@@ -85,26 +85,6 @@ class CondTrainer(Trainer):
             persistent_workers=self.args.dataloader_persistent_workers,
         )
 
-
-class _DeferredSmokeChecks(TrainerCallback):
-    """Run tokenizer-heavy smoke checks only after DataLoader workers fork."""
-
-    def __init__(self, runner: Callable[[], None]):
-        self._runner = runner
-        self._has_run = False
-
-    def on_step_begin(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        if not self._has_run:
-            self._runner()
-            self._has_run = True
-        return control
-
     @staticmethod
     def _first_label_index(label_weights: torch.Tensor) -> torch.Tensor:
         """
@@ -271,6 +251,26 @@ class _DeferredSmokeChecks(TrainerCallback):
             self._update_aux_metrics(aux_loss, aux_logits, gold_y)
 
         return (total_loss, out) if return_outputs else total_loss
+
+
+class _DeferredSmokeChecks(TrainerCallback):
+    """Run tokenizer-heavy smoke checks only after DataLoader workers fork."""
+
+    def __init__(self, runner: Callable[[], None]):
+        self._runner = runner
+        self._has_run = False
+
+    def on_step_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        if not self._has_run:
+            self._runner()
+            self._has_run = True
+        return control
 
 
 class _FirstStepTimerCallback(TrainerCallback):
