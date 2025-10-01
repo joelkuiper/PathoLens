@@ -15,8 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from util import get_device
-
 try:  # Python 3.11+
     import tomllib  # type: ignore[attr-defined]
 except ModuleNotFoundError:  # pragma: no cover - fallback for <3.11
@@ -25,19 +23,6 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for <3.11
 
 class ConfigError(RuntimeError):
     """Raised when pipeline configuration is invalid."""
-
-
-def resolve_device(device: Optional[str]) -> str:
-    """Normalise a device string, falling back to hardware auto-detection."""
-
-    if device is None:
-        return get_device()
-
-    dev = str(device).strip()
-    if not dev or dev.lower() == "auto":
-        return get_device()
-
-    return dev
 
 
 def _norm_path(value: Any, base: Optional[Path] = None) -> Path:
@@ -81,7 +66,6 @@ class PathsConfig:
 @dataclass
 class DNAConfig:
     model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g"
-    revision: Optional[str] = None
     window: int = 128
     max_length: int = 384
     batch_size: int = 16
@@ -93,7 +77,6 @@ class DNAConfig:
 @dataclass
 class ProteinConfig:
     model_id: str = "facebook/esm2_t12_35M_UR50D"
-    revision: Optional[str] = None
     batch_size: int = 8
     max_length: int = 2048
     window: int = 127
@@ -178,12 +161,8 @@ class PipelineConfig:
             self.run.manifest_path = default_manifest
         elif not isinstance(self.run.manifest_path, Path):
             self.run.manifest_path = Path(str(self.run.manifest_path))
-        if isinstance(self.run.device, str):
-            normalized = self.run.device.strip()
-            if not normalized or normalized.lower() == "auto":
-                self.run.device = None
-            else:
-                self.run.device = normalized
+        if isinstance(self.run.device, str) and self.run.device.lower() == "auto":
+            self.run.device = None
 
 
 def _section(data: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -310,6 +289,4 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         llm=llm,
         run=run,
     )
-    cfg.run.device = resolve_device(cfg.run.device)
-
     return cfg

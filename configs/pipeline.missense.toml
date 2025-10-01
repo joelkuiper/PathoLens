@@ -15,7 +15,6 @@ artifacts = "artifacts/missense"
 
 [DNA]
 model_id = "InstaDeepAI/nucleotide-transformer-500m-1000g"
-# revision = "<commit-hash-or-tag>"  # Optional: pin the HF snapshot to avoid upstream drift
 window = 128
 max_length = 384
 batch_size = 16
@@ -24,7 +23,6 @@ force_embeddings = false
 
 [Protein]
 model_id = "facebook/esm2_t12_35M_UR50D"
-# revision = "<commit-hash-or-tag>"  # Optional: pin the HF snapshot to avoid upstream drift
 batch_size = 8
 # ``window`` is the target length (residues) for the centered protein slice
 window = 127
@@ -51,12 +49,12 @@ out_dir = "artifacts/missense/qwen3"
 model_id = "Qwen/Qwen3-4B-Instruct-2507"
 epochs = 1
 max_len = 256
-per_device_bs = 20
+per_device_bs = 16
 grad_accum = 8
 lr = 0.0003
 seed = 42
 num_workers = 0
-prefetch_factor = 6
+prefetch_factor = 2
 persistent_workers = false
 pin_memory = true
 group_by_length = false
