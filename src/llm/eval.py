@@ -168,9 +168,6 @@ def evaluate_split_batched(
         f"modalities={cond_spec.get('modalities', []) if cond_spec else 'unknown'}"
     )
 
-    tok, model = load_finetuned_model(model_id, adapter_dir, projector_path)
-    enable_fast_generate(model, tok)
-
     ds = seq_ds[split]
     N_all = len(ds)
 
@@ -182,13 +179,6 @@ def evaluate_split_batched(
     if N == 0:
         return {"n": 0, "note": f"No samples in split '{split}'."}
 
-    label_variants_cache: Dict[str, list[list[int]]] = {}
-
-    def _label_variants(label: str) -> list[list[int]]:
-        if label not in label_variants_cache:
-            label_variants_cache[label] = encode_label_variants(tok, label)
-        return label_variants_cache[label]
-
     eval_dataset = _EvalDataset(ds, idxs)
     loader = _build_eval_loader(
         eval_dataset,
@@ -196,6 +186,19 @@ def evaluate_split_batched(
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
     )
+
+    # IMPORTANT: load the tokenizer/model only after DataLoader worker processes
+    # have been initialized. Otherwise Hugging Face tokenizers sees a fork after
+    # parallelism has started and emits TOKENIZERS_PARALLELISM warnings.
+    tok, model = load_finetuned_model(model_id, adapter_dir, projector_path)
+    enable_fast_generate(model, tok)
+
+    label_variants_cache: Dict[str, list[list[int]]] = {}
+
+    def _label_variants(label: str) -> list[list[int]]:
+        if label not in label_variants_cache:
+            label_variants_cache[label] = encode_label_variants(tok, label)
+        return label_variants_cache[label]
 
     y_true: List[int] = []
     y_pred: List[int] = []
