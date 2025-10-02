@@ -662,6 +662,8 @@ def process_and_cache_protein(
     window: int = 127,
     max_length: int = 2048,
     force_embeddings: bool = False,
+    archive_compression: Optional[str] = "lzf",
+    archive_compression_opts: Optional[int] = None,
 ) -> tuple[pd.DataFrame, str]:
     """
     Loads VEP-joined WT/MT sequences, embeds with ESM2 (unique-only with interleaved scheduling),
@@ -754,9 +756,17 @@ def process_and_cache_protein(
             embed_dim=D,
             chunk_rows=batch_rows,
             kind="Protein",
+            compression=archive_compression,
+            compression_opts=archive_compression_opts,
         )
         archive_prepared = True
         encoder_bundle = (tok, enc, device, seq_len, D, N, batch_rows)
+        with h5py.File(out_h5_path, "r") as store:
+            compression_desc = store.attrs.get("compression", "unknown")
+        print(
+            f"[protein][embeddings] initialise archive path={out_h5_path} rows={N} seq_len={seq_len} "
+            f"embed_dim={D} compression={compression_desc}"
+        )
 
     # window trimming now that archive (if needed) exists on disk
     trimmed_wt: List[str] = []
@@ -803,6 +813,8 @@ def process_and_cache_protein(
                 embed_dim=D,
                 chunk_rows=batch_rows,
                 kind="Protein",
+                compression=archive_compression,
+                compression_opts=archive_compression_opts,
             )
         print(
             f"[protein][embeddings] start rows={N} seq_len={seq_len} embed_dim={D} batch_size={batch_rows} device={device}"

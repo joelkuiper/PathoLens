@@ -3,9 +3,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Tuple
+from typing import Dict, Iterator, Tuple, Optional
 
 import h5py
+
+try:
+    from h5py import h5z
+except Exception:  # pragma: no cover - optional dependency branch
+    h5z = None  # type: ignore[assignment]
 
 _H5_EXTS = {".h5", ".hdf5"}
 
@@ -34,6 +39,30 @@ class SequenceArchiveLayout:
     pos_channels: int = 1
 
 
+def _normalise_compression(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    norm = str(name).strip().lower()
+    if norm in {"", "none", "false", "0"}:
+        return None
+    if norm in {"gzip", "gz", "deflate"}:
+        return "gzip"
+    return norm
+
+
+def _compression_supported(name: Optional[str]) -> bool:
+    if name is None:
+        return True
+    if h5z is None:
+        return name is None
+    if name == "gzip":
+        return bool(h5z.filter_avail(h5z.FILTER_DEFLATE))
+    if name == "lzf":
+        return bool(h5z.filter_avail(h5z.FILTER_LZF))
+    # For unknown filters, optimistically assume availability and let HDF5 error if not.
+    return True
+
+
 def initialise_sequence_archive(
     out_path: str | Path,
     *,
@@ -43,6 +72,9 @@ def initialise_sequence_archive(
     embed_dim: int,
     chunk_rows: int,
     kind: str,
+    compression: Optional[str] = "gzip",
+    compression_opts: Optional[int] = 4,
+    shuffle: bool = True,
 ) -> Path:
     """Create (or truncate) an archive with the requested datasets and metadata."""
 
@@ -50,19 +82,34 @@ def initialise_sequence_archive(
     path.parent.mkdir(parents=True, exist_ok=True)
     chunk = max(1, min(int(chunk_rows), int(n_rows))) if n_rows else 1
 
+    requested_compression = _normalise_compression(compression)
+    effective_compression = (
+        requested_compression if _compression_supported(requested_compression) else None
+    )
+    compression_kwargs: Dict[str, object] = {}
+    if effective_compression is not None:
+        compression_kwargs["compression"] = effective_compression
+        if effective_compression == "gzip":
+            level = 4 if compression_opts is None else max(0, int(compression_opts))
+            compression_kwargs["compression_opts"] = level
+    elif requested_compression is not None and requested_compression != effective_compression:
+        print(
+            f"[sequence_cache] compression '{requested_compression}' unavailable -> falling back to uncompressed"
+        )
+
     with h5py.File(path, "w") as h5:
 
         def create_dataset(name: str, shape: Tuple[int, ...], dtype: str, *, fillvalue):
-            h5.create_dataset(
+            ds = h5.create_dataset(
                 name,
                 shape=shape,
                 dtype=dtype,
-                compression="gzip",
-                compression_opts=4,
-                shuffle=True,
+                shuffle=bool(shuffle and compression_kwargs.get("compression")),
                 chunks=(chunk,) + shape[1:],
                 fillvalue=fillvalue,
+                **compression_kwargs,
             )
+            return ds
 
         create_dataset(
             layout.wt_tokens,
@@ -93,6 +140,14 @@ def initialise_sequence_archive(
         h5.attrs["seq_len"] = int(seq_len)
         h5.attrs["embed_dim"] = int(embed_dim)
         h5.attrs["complete"] = 0
+        comp_attr = compression_kwargs.get("compression")
+        if comp_attr == "gzip":
+            level = compression_kwargs.get("compression_opts")
+            h5.attrs["compression"] = f"gzip:{level}" if level is not None else "gzip"
+        elif comp_attr:
+            h5.attrs["compression"] = str(comp_attr)
+        else:
+            h5.attrs["compression"] = "none"
         h5.flush()
 
     return path

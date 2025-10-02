@@ -404,6 +404,8 @@ def process_and_cache_dna(
     dna_model_id: str = "InstaDeepAI/nucleotide-transformer-500m-1000g",
     force_windows: bool = False,
     force_embeddings: bool = False,
+    archive_compression: Optional[str] = "lzf",
+    archive_compression_opts: Optional[int] = None,
 ) -> tuple[pd.DataFrame, str]:
     os.makedirs(os.path.dirname(out_meta), exist_ok=True)
     out_h5_path = ensure_h5_path(out_h5, kind="DNA")
@@ -571,6 +573,14 @@ def process_and_cache_dna(
             embed_dim=D,
             chunk_rows=batch_rows,
             kind="DNA",
+            compression=archive_compression,
+            compression_opts=archive_compression_opts,
+        )
+        with h5py.File(out_h5_path, "r") as store:
+            compression_desc = store.attrs.get("compression", "unknown")
+        print(
+            f"[dna][embeddings] initialise archive path={out_h5_path} rows={N} seq_len={seq_len} "
+            f"embed_dim={D} compression={compression_desc}"
         )
 
         with open_sequence_archive(
