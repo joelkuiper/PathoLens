@@ -788,9 +788,10 @@ def process_and_cache_protein(
         indices = list(range(N))
         wt_seqs = [str(s) for s in kept["seq_wt"].tolist()]
         mt_seqs = [str(s) for s in kept["seq_mt"].tolist()]
-        edit_indices = [
-            min(max(int(edit_positions[i]), 0), seq_len - 1) for i in range(N)
-        ]
+        edit_indices = np.clip(
+            np.array(edit_positions, dtype=np.int64), 0, seq_len - 1
+        ).astype(np.int64, copy=False)
+        frameshift_flags = np.array(frameshift_flags, dtype=bool)
         base_pos = np.arange(seq_len, dtype=np.float16)
 
         if not archive_prepared:
@@ -818,6 +819,9 @@ def process_and_cache_protein(
             gap_mask_ds = archive.gap_mask
             pos_ds = archive.pos
             frameshift_ds = archive.extra_masks.get("prot_frameshift_mask")
+            frameshift_positions = (
+                np.arange(seq_len, dtype=np.int64) if frameshift_ds is not None else None
+            )
 
             total_batches = max(1, math.ceil(N / max(int(batch_size), 1)))
             for chunk in tqdm(
@@ -868,12 +872,19 @@ def process_and_cache_protein(
                 edit_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
                 pos_batch = np.zeros((bsz, seq_len, 1), dtype=np.float16)
                 frameshift_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
-                for j, row_idx in enumerate(idxs_arr):
-                    idx = edit_indices[row_idx]
-                    edit_batch[j, idx] = 1
-                    pos_batch[j, :, 0] = base_pos - np.float16(idx)
-                    if frameshift_flags[row_idx]:
-                        frameshift_batch[j, idx:] = 1
+                if bsz:
+                    batch_edit_indices = edit_indices[idxs_arr].astype(np.int64, copy=False)
+                    edit_batch[np.arange(bsz), batch_edit_indices] = 1
+                    batch_offsets = batch_edit_indices.astype(np.float16, copy=False)[:, None]
+                    pos_batch[:, :, 0] = base_pos[None, :] - batch_offsets
+
+                    if frameshift_ds is not None:
+                        frameshift_active = frameshift_flags[idxs_arr]
+                        if np.any(frameshift_active):
+                            frameshift_batch[frameshift_active] = (
+                                frameshift_positions[None, :]
+                                >= batch_edit_indices[frameshift_active, None]
+                            ).astype(np.uint8)
 
                 if bsz and np.all(np.diff(idxs_arr) == 1):
                     start = int(idxs_arr[0])

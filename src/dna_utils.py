@@ -559,8 +559,8 @@ def process_and_cache_dna(
         N = len(ref_seqs)
         ref_seqs = [str(s) for s in ref_seqs]
         alt_seqs = [str(s) for s in alt_seqs]
-        edit_positions = [int(e) for e in edit_positions]
-        edit_indices = [min(max(int(idx), 0), seq_len - 1) for idx in edit_positions]
+        edit_positions = np.array([int(e) for e in edit_positions], dtype=np.int64)
+        edit_indices = np.clip(edit_positions, 0, seq_len - 1).astype(np.int64)
         base_pos = np.arange(seq_len, dtype="float16")
         batch_rows = max(1, int(batch_size))
         initialise_sequence_archive(
@@ -638,10 +638,11 @@ def process_and_cache_dna(
                 edit_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
                 pos_batch = np.zeros((bsz, seq_len, 1), dtype=np.float16)
                 splice_batch = np.zeros((bsz, seq_len), dtype=np.uint8)
-                for j, row_idx in enumerate(idxs_arr):
-                    idx = edit_indices[row_idx]
-                    edit_batch[j, idx] = 1
-                    pos_batch[j, :, 0] = base_pos - np.float16(idx)
+                if bsz:
+                    batch_edit_indices = edit_indices[idxs_arr].astype(np.int64, copy=False)
+                    edit_batch[np.arange(bsz), batch_edit_indices] = 1
+                    batch_offsets = batch_edit_indices.astype(np.float16, copy=False)[:, None]
+                    pos_batch[:, :, 0] = base_pos[None, :] - batch_offsets
 
                 if bsz and np.all(np.diff(idxs_arr) == 1):
                     start = int(idxs_arr[0])
