@@ -201,6 +201,88 @@ def _build_flat_layout(
     return layout, offset
 
 
+@dataclass(frozen=True)
+class _ConditioningVectorizer:
+    """Bidirectional view between structured conditioning dicts and flat vectors."""
+
+    layout: Dict[Tuple[str, str], slice]
+    flat_dim: int
+
+    @classmethod
+    def from_spec(cls, spec: Optional[Mapping[str, Any]]) -> "_ConditioningVectorizer":
+        layout, dim = _build_flat_layout(spec or {})
+        return cls(layout=layout, flat_dim=dim)
+
+    def flatten(
+        self, conditioning: Mapping[str, Mapping[str, torch.Tensor]]
+    ) -> Tuple[torch.Tensor, Dict[Tuple[str, str], tuple[Tuple[int, ...], torch.dtype]], Dict[str, Dict[str, torch.Tensor]]]:
+        vec = torch.zeros(self.flat_dim, dtype=torch.float32)
+        info: Dict[Tuple[str, str], tuple[Tuple[int, ...], torch.dtype]] = {}
+        passthrough: Dict[str, Dict[str, torch.Tensor]] = {}
+
+        if not self.layout:
+            for modality, fields in conditioning.items():
+                passthrough[modality] = {}
+                for key, value in fields.items():
+                    tensor = torch.as_tensor(value).detach().cpu()
+                    passthrough[modality][key] = tensor.clone()
+            return vec, info, passthrough
+
+        for modality, fields in conditioning.items():
+            if not isinstance(fields, Mapping):
+                continue
+            for key, value in fields.items():
+                tensor = torch.as_tensor(value).detach().cpu()
+                field_id = (modality, key)
+                if field_id not in self.layout or tensor.numel() == 0:
+                    passthrough.setdefault(modality, {})[key] = tensor.clone()
+                    continue
+
+                sl = self.layout[field_id]
+                flat = tensor.reshape(-1).to(dtype=torch.float32)
+                expected = sl.stop - sl.start
+                if flat.numel() != expected:
+                    if flat.numel() < expected:
+                        pad = torch.zeros(expected, dtype=torch.float32)
+                        pad[: flat.numel()] = flat
+                        flat = pad
+                    else:
+                        flat = flat[:expected]
+
+                vec[sl] = flat
+                info[field_id] = (tuple(tensor.shape), tensor.dtype)
+
+        return vec, info, passthrough
+
+    def restore(
+        self,
+        vec: torch.Tensor,
+        info: Mapping[Tuple[str, str], tuple[Tuple[int, ...], torch.dtype]],
+        passthrough: Mapping[str, Mapping[str, torch.Tensor]],
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
+        restored: Dict[str, Dict[str, torch.Tensor]] = {}
+
+        for field_id, sl in self.layout.items():
+            meta = info.get(field_id)
+            if meta is None:
+                continue
+
+            shape, dtype = meta
+            segment = vec[sl]
+            tensor = segment.reshape(shape)
+            if tensor.dtype != dtype:
+                tensor = tensor.to(dtype=dtype)
+            modality, key = field_id
+            restored.setdefault(modality, {})[key] = tensor
+
+        for modality, fields in passthrough.items():
+            mod_store = restored.setdefault(modality, {})
+            for key, value in fields.items():
+                mod_store[key] = value.clone()
+
+        return restored
+
+
 class _TransformedSplit:
     """
     Read-through view that transforms the conditioning vector per item.
@@ -213,7 +295,7 @@ class _TransformedSplit:
         self.cfg = cfg
         self.meta = getattr(base_split, "meta", None)
         spec = getattr(base_split, "cond_spec", {}) or {}
-        self._layout, self._flat_dim = _build_flat_layout(spec)
+        self._vectorizer = _ConditioningVectorizer.from_spec(spec)
 
     def __len__(self):
         return len(self.base)
@@ -229,91 +311,91 @@ class _TransformedSplit:
             extras = ()
             pack_tuple = False
 
-        def _flatten_conditioning(
-            conditioning: Mapping[str, Mapping[str, torch.Tensor]]
-        ) -> np.ndarray:
-            vec = np.zeros(self._flat_dim, dtype=np.float32)
-            if not self._layout:
-                return vec
-            for (modality, key), sl in self._layout.items():
-                mod_fields = conditioning.get(modality)
-                if not isinstance(mod_fields, Mapping) or key not in mod_fields:
-                    continue
-                tensor = torch.as_tensor(mod_fields[key]).detach().cpu()
-                if tensor.numel() == 0:
-                    continue
-                arr = tensor.reshape(-1).to(torch.float32).numpy()
-                expected = sl.stop - sl.start
-                if arr.size != expected:
-                    if arr.size < expected:
-                        arr = np.pad(arr, (0, expected - arr.size), mode="constant")
-                    else:
-                        arr = arr[:expected]
-                vec[sl] = arr
-            return vec
-
-        def _to_numpy(val):
+        def _to_vector(val):
             if isinstance(val, Mapping):
-                return _flatten_conditioning(val)
-            return (
-                val.numpy()
-                if hasattr(val, "numpy")
-                else np.asarray(val, dtype=np.float32)
-            )
+                vec, info, passthrough = self._vectorizer.flatten(val)
+
+                def _restore(z: torch.Tensor):
+                    return self._vectorizer.restore(z, info, passthrough)
+
+                return vec, _restore, True
+
+            tensor = torch.as_tensor(val).detach().cpu()
+            orig_shape = tensor.shape
+            orig_dtype = tensor.dtype
+            is_numpy = isinstance(val, np.ndarray)
+
+            def _restore(z: torch.Tensor):
+                out = z.reshape(orig_shape)
+                if is_numpy:
+                    arr = out.numpy()
+                    if arr.dtype != val.dtype:
+                        arr = arr.astype(val.dtype, copy=False)
+                    return arr.reshape(orig_shape)
+                return out.to(dtype=orig_dtype)
+
+            flat = tensor.reshape(-1).to(torch.float32)
+            return flat, _restore, False
 
         # Optionally fetch a different vector (permute across dataset)
         if self.cfg.mode == "permute":
             j = int(self.cfg.perm_index[i])  # remap index
             perm_item = self.base[j]
             perm_x = perm_item[0] if isinstance(perm_item, tuple) else perm_item
-            v = _to_numpy(perm_x)
+            v, restore, is_mapping = _to_vector(perm_x)
         else:
-            v = _to_numpy(x)
+            v, restore, is_mapping = _to_vector(x)
 
-        v = v.astype(np.float32, copy=False)
         mode = self.cfg.mode
 
         if mode == "zero":
-            z = np.zeros_like(v, dtype=np.float32)
+            z = torch.zeros_like(v)
 
         elif mode == "pure-noise":
-            # Replace entirely by noise
             sigma = float(self.cfg.noise_std if self.cfg.noise_std is not None else 1.0)
-            z = np.random.normal(0.0, sigma, size=v.shape).astype(np.float32)
+            z = torch.randn_like(v) * sigma
 
         elif mode == "noise":
-            # Additive noise to existing vector
             if self.cfg.noise_std is not None:
                 sigma = float(self.cfg.noise_std)
             else:
-                sigma = float(self.cfg.noise_alpha) * (np.std(v) + 1e-6)
-            noise = np.random.normal(0.0, sigma, size=v.shape).astype(np.float32)
-            z = v + noise
+                sigma = float(self.cfg.noise_alpha) * (float(v.std().item()) + 1e-6)
+            z = v + torch.randn_like(v) * sigma
 
         elif mode == "scale":
-            z = (float(self.cfg.scale) * v).astype(np.float32, copy=False)
+            z = v * float(self.cfg.scale)
 
         else:  # identity or permute (already swapped)
             z = v
 
         zero_ranges = self.cfg.zero_ranges or ()
         if zero_ranges:
-            if not isinstance(z, np.ndarray):
-                z = np.asarray(z, dtype=np.float32)
-            if not z.flags.writeable or mode in ("identity", "permute"):
-                z = z.copy()
+            if not z.is_floating_point():
+                z = z.to(torch.float32)
+            if not z.is_contiguous():
+                z = z.contiguous()
+            if mode in ("identity", "permute"):
+                z = z.clone()
             n = z.shape[0]
             for start, end in zero_ranges:
                 s = max(0, min(n, int(start)))
                 e = max(0, min(n, int(end)))
                 if e > s:
                     z[s:e] = 0.0
-            z = z.astype(np.float32, copy=False)
+            z = z.to(torch.float32)
 
-        out_x = torch.from_numpy(z)
+        result = restore(z)
+        if is_mapping:
+            if pack_tuple:
+                return (result, *extras)
+            return result
+
+        if isinstance(x, torch.Tensor):
+            result = result.reshape(x.shape)
+
         if pack_tuple:
-            return (out_x, *extras)
-        return out_x
+            return (result, *extras)
+        return result
 
     def __getattr__(self, name):
         return getattr(self.base, name)
