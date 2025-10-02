@@ -22,7 +22,7 @@ force_embeddings = false
 
 [Protein]
 enabled = true
-model_id = "facebook/esm2_t30_150M_UR50D"
+model_id = "esmc_600m"
 batch_size = 32
 # ``window`` is the target length (residues) for the centered protein slice
 window = 127

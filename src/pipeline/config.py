@@ -77,7 +77,7 @@ class DNAConfig:
 @dataclass
 class ProteinConfig:
     enabled: bool = True
-    model_id: str = "facebook/esm2_t12_35M_UR50D"
+    model_id: str = "esmc_600m"
     batch_size: int = 8
     max_length: int = 2048
     window: int = 127

@@ -5,7 +5,7 @@
 ## Task
 Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicity of a variant. Many tools attempt to predict pathogenicity (e.g., CADD), and it is generally considered a hard problem because signal comes from diverse molecular and biological factors.
 
-Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector, a node2vec embedding of the gene's [Gene Ontology](https://www.geneontology.org/) neighbourhood, and protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM2](https://github.com/facebookresearch/esm) embeddings.
+Here we reduce the task to a binary label (pathogenic/benign) and fine-tune an LLM to consume *virtual conditioning tokens* derived from a [1000 Genomes nucleotide transformer](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g) difference vector, a node2vec embedding of the gene's [Gene Ontology](https://www.geneontology.org/) neighbourhood, and protein-level descriptors built from [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/index.html) + [ESM C](https://github.com/evolutionaryscale/esm) embeddings.
 
 ## Intuition and basic idea
 
@@ -184,7 +184,7 @@ mkdir -p data/raw/
 wget -i sources.txt -P data/raw/
 ```
 
-In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g), [ESM2](https://huggingface.co/facebook/esm2_t12_35M_UR50D) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
+In addition it pulls the [nucleotide-transformer-500m-1000g model](https://huggingface.co/InstaDeepAI/nucleotide-transformer-500m-1000g), [ESM C](https://github.com/evolutionaryscale/esm) and [Qwen3-4B-Instruct-2507 model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) from HuggingFace.
 
 ### Dependencies
 Install the dependencies via [uv](https://docs.astral.sh/uv/) and activate the venv.
@@ -205,7 +205,7 @@ environment:
 - `[Paths]` points at the ClinVar TSV, GRCh38 FASTA, and the destination artifacts
   directory.
 - `[DNA]` controls nucleotide-transformer windowing/encoding and cache overwrite flags.
-- `[Protein]` controls the VEP → ESM2 pathway and includes Docker/cache settings.
+- `[Protein]` controls the VEP → ESM C pathway and includes Docker/cache settings.
 - `[LLM]` configures the Qwen LoRA fine-tune.
 - `[Run]` controls manifest writing and global overrides (e.g. forcing split regeneration).
 

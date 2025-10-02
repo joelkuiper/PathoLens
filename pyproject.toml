@@ -22,6 +22,7 @@ dependencies = [
     "scikit-learn>=1.7.1",
     "scipy>=1.11.4",
     "setuptools>=80.9.0",
+    "esm>=3.0.0",
     "torch>=2.8.0",
     "torch-geometric>=2.6.1",
     "tqdm>=4.67.1",

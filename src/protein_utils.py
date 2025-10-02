@@ -1,6 +1,6 @@
 # src/protein_utils.py
 from __future__ import annotations
-from typing import Tuple, Optional, List, Dict, Mapping
+from typing import Tuple, Optional, List, Dict, Mapping, Sequence
 from difflib import SequenceMatcher
 import os
 from pathlib import Path
@@ -10,8 +10,11 @@ import h5py
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModel
+
+from esm.models.esmc import ESMC
+from esm.sdk.api import ESMProtein, LogitsConfig
 
 from src.sequence_cache import (
     SequenceArchiveLayout,
@@ -267,307 +270,236 @@ def _device_is_mps(device: str | torch.device) -> bool:
     )
 
 
+def _probe_embedding_dim(model: ESMC) -> int:
+    """Run a one-off encode/logits pass to determine the embedding width."""
+
+    tokenizer = getattr(model, "sequence_tokenizer", None)
+    if tokenizer is not None and getattr(tokenizer, "mask_token", None) is None:
+        replacement: str | None = None
+        special_tokens = getattr(tokenizer, "special_tokens_map", None)
+        if isinstance(special_tokens, Mapping):
+            replacement = special_tokens.get("mask_token") or special_tokens.get("mask")
+        if not isinstance(replacement, str):
+            replacement = ""
+        try:
+            setattr(tokenizer, "mask_token", replacement)
+        except Exception:
+            pass
+
+    probe = ESMProtein(sequence="ACDEFGHIKLMNPQRSTVWY")
+
+    try:
+        encoded = model.encode(probe)
+        logits = model.logits(
+            encoded, LogitsConfig(sequence=True, return_embeddings=True)
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging for unexpected SDK issues
+        raise RuntimeError(
+            "Failed to run probe encode to infer embedding dimension"
+        ) from exc
+
+    embeddings = getattr(logits, "embeddings", None)
+    if not isinstance(embeddings, torch.Tensor) or embeddings.ndim < 3:
+        raise RuntimeError(
+            "ESMC logits output did not provide token embeddings for probe sequence"
+        )
+
+    return int(embeddings.shape[-1])
+
+
 def build_protein_encoder(
-    model_id: str = "facebook/esm2_t33_650M_UR50D",
+    model_id: str = "esmc_600m",
     device: Optional[str] = None,
 ):
     """
-    Create tokenizer + model on the requested device.
-    - CUDA: bf16 weights (fast & memory-friendly with AMP)
-    - MPS:  fp16 if supported, otherwise fp32
-    - CPU:  fp32
+    Create an ESMC model on the requested device.
+    - CUDA: preferred when available
+    - MPS:  fall back to CPU (ESMC currently targets CUDA/CPU)
+    - CPU:  always available
     """
+
     device = device or (
         "cuda"
         if torch.cuda.is_available()
         else ("mps" if torch.backends.mps.is_available() else "cpu")
     )
-    tok = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True, use_fast=False
-    )
-    if tok.pad_token is None:
-        tok.add_special_tokens({"pad_token": tok.eos_token or "<pad>"})
-    tok.padding_side = "right"
 
-    # Choose a sensible torch_dtype per backend
-    if _device_is_cuda(device):
-        prefer_dtype = torch.bfloat16
-    elif _device_is_mps(device):
-        # MPS fp16 can reduce memory a lot; if load fails we fall back to fp32
-        prefer_dtype = torch.float16
-    else:
-        prefer_dtype = torch.float32
+    if _device_is_mps(device):
+        device = "cpu"
 
-    try:
-        enc = AutoModel.from_pretrained(
-            model_id, trust_remote_code=True, torch_dtype=prefer_dtype
-        )
-    except Exception:
-        # Fallback to fp32 if half/bf16 unsupported
-        enc = AutoModel.from_pretrained(
-            model_id, trust_remote_code=True, torch_dtype=torch.float32
-        )
+    model = ESMC.from_pretrained(model_id)
+    model = model.to(device).eval()
 
-    if enc.get_input_embeddings().num_embeddings < len(tok):
-        enc.resize_token_embeddings(len(tok))
-    enc = enc.to(device).eval()
-
-    # Light perf hint for matmuls (no-op on some backends)
     try:
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
 
-    return tok, enc, device
+    embed_dim = _probe_embedding_dim(model)
+    return model, device, embed_dim
+
+
+def _pad_to_length(t: torch.Tensor, length: int, value: float = 0.0) -> torch.Tensor:
+    if t.dim() == 3:
+        if t.size(1) == length:
+            return t
+        if t.size(1) > length:
+            return t[:, :length, :]
+        pad = length - t.size(1)
+        return F.pad(t, (0, 0, 0, pad), value=value)
+    if t.dim() == 2:
+        if t.size(1) == length:
+            return t
+        if t.size(1) > length:
+            return t[:, :length]
+        pad = length - t.size(1)
+        return F.pad(t, (0, pad), value=value)
+    if t.dim() == 1:
+        if t.size(0) == length:
+            return t
+        if t.size(0) > length:
+            return t[:length]
+        pad = length - t.size(0)
+        return F.pad(t, (0, pad), value=value)
+    raise RuntimeError(f"Cannot pad tensor with rank {t.dim()}")
+
+
+def _extract_sequence_mask(
+    encoded,
+    logits,
+    seqs: List[str],
+    device: str | torch.device,
+) -> torch.Tensor:
+    mask = None
+
+    token_data = getattr(encoded, "token_data", None)
+    if token_data is not None:
+        mask = getattr(token_data, "mask", None)
+
+    if mask is None:
+        for attr in (
+            "mask",
+            "sequence_mask",
+            "sequence_token_mask",
+            "attention_mask",
+        ):
+            mask = getattr(encoded, attr, None)
+            if mask is not None:
+                break
+
+    if mask is None and logits is not None:
+        for attr in (
+            "mask",
+            "sequence_mask",
+            "sequence_token_mask",
+            "attention_mask",
+        ):
+            mask = getattr(logits, attr, None)
+            if mask is not None:
+                break
+
+    if mask is not None:
+        mask = mask.to(device=device)
+        return mask
+
+    lengths = [len(s or "") for s in seqs]
+    batch = len(lengths)
+    if batch == 0:
+        return torch.zeros((0, 0), dtype=torch.float32, device=device)
+
+    emb = getattr(logits, "embeddings", None)
+    if emb is not None and isinstance(emb, torch.Tensor):
+        L = emb.size(1)
+    else:
+        tokens = getattr(encoded, "sequence_tokens", None)
+        if isinstance(tokens, torch.Tensor):
+            L = tokens.size(1)
+        else:
+            L = max(lengths) if lengths else 0
+
+    mask_tensor = torch.zeros((batch, L), dtype=torch.float32, device=device)
+    for i, length in enumerate(lengths):
+        keep = max(0, min(length, L))
+        if keep:
+            mask_tensor[i, :keep] = 1.0
+    return mask_tensor
 
 
 @torch.inference_mode()
 def encode_sequence_tokens(
-    seqs: List[str],
-    model,
-    tokenizer,
+    seqs: Sequence[str | ESMProtein],
+    model: ESMC,
     device: str | torch.device,
     max_length: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    toks = tokenizer(
-        seqs,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=max_length,
-        add_special_tokens=True,
-    )
-    toks = {k: v.to(device) for k, v in toks.items()}
-    out = model(**toks).last_hidden_state
-    attn = toks["attention_mask"]
-    out = out[:, 1:, :]
-    attn = attn[:, 1:]
-    return out.to(torch.float32), attn.to(torch.float32)
-
-
-# ============================================================
-# Embedding (unique dedupe + interleaved schedule + memmap)
-# ============================================================
-
-
-def _build_dedup(seqs: List[str]) -> Tuple[List[str], Dict[int, int]]:
-    """
-    Deduplicate sequences (preserve first occurrence).
-    Returns:
-      uniq_list: unique sequences in stable order
-      row2uniq:  map row_idx -> uniq_idx
-    """
-    uniq_map: Dict[str, int] = {}
-    row2uniq: Dict[int, int] = {}
-    uniq_list: List[str] = []
-    for i, s in enumerate(seqs):
-        j = uniq_map.get(s)
-        if j is None:
-            j = len(uniq_list)
-            uniq_map[s] = j
-            uniq_list.append(s)
-        row2uniq[i] = j
-    return uniq_list, row2uniq
-
-
-def _length_interleave_order(lengths: List[int], bin_size: int) -> List[int]:
-    """
-    Sort by length, then within windows interleave [long, short, long, short, ...].
-    This keeps batch Lmax relatively stable across the run and avoids the
-    "fast 60% then crawl" pattern.
-    """
-    order = sorted(range(len(lengths)), key=lambda i: lengths[i])
-    bins = [order[i : i + bin_size] for i in range(0, len(order), bin_size)]
-
-    def interleave_minmax(idxs: List[int]) -> List[int]:
-        i, j, out = 0, len(idxs) - 1, []
-        while i <= j:
-            out.append(idxs[j])
-            j -= 1  # long
-            if i <= j:
-                out.append(idxs[i])
-                i += 1  # short
-        return out
-
-    schedule: List[int] = []
-    for idxs in bins:
-        schedule.extend(interleave_minmax(idxs))
-    return schedule
-
-
-def _dynamic_batches(
-    schedule: List[int],
-    uniq_list: List[str],
-    target_tokens: Optional[int],
-    max_bs: int,
-):
-    """
-    Yield batches as lists of uniq indices.
-    If target_tokens is set, choose batch size so max_len * batch_size ≲ target_tokens.
-    Otherwise, use fixed batch chunks of size max_bs.
-    """
-    if not schedule:
-        return
-    if not target_tokens:
-        for i in range(0, len(schedule), max_bs):
-            yield schedule[i : i + max_bs]
-        return
-
-    i = 0
-    while i < len(schedule):
-        Lmax = 0
-        j = i
-        while j < len(schedule):
-            Lmax = max(Lmax, len(uniq_list[schedule[j]]))
-            bs = j - i + 1
-            if (Lmax * bs) > target_tokens and bs > 1:
-                break
-            j += 1
-        yield schedule[i:j]
-        i = j
-
-
-def _empty_backend_cache_if_possible(device):
-    # Avoid fragmentation on GPU backends
-    if _device_is_cuda(device):
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-    elif _device_is_mps(device):
-        try:
-            torch.mps.empty_cache()
-        except Exception:
-            pass
-
-
-@torch.inference_mode()
-def embed_unique_to_memmap(
-    seqs: List[str],
-    tok,
-    enc,
-    device: str | torch.device,
-    out_path: str | Path,
     *,
-    max_length: int = 4096,
-    pool: str = "mean",
-    batch_size: int = 32,
-    interleave_window_factor: int = 8,
-    target_tokens: Optional[int] = None,  # auto-picked on MPS if None
-) -> Tuple[str, List[str], Dict[int, int]]:
-    """
-    Encode UNIQUE sequences to a disk memmap [U, D].
-    - Interleaves long/short within windows to avoid end-of-run crawl.
-    - Token-budgeted dynamic batching (max_len * batch_size ≲ target_tokens).
-    - Automatic backoff: split batches on OOM.
-    - **MPS OOM fallback**: if a single-item batch still OOMs on MPS, move the model
-      to CPU once and finish the remaining pending work on CPU (no crash).
-    """
-    out_path = str(out_path)
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    logits_config: Optional[LogitsConfig] = None,
+    embed_dim: Optional[int] = None,
+    seq_strings: Optional[Sequence[str]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    seq_items = list(seqs)
 
-    uniq_list, row2uniq = _build_dedup(seqs)
-    U = len(uniq_list)
-    if U == 0:
-        np.memmap(out_path, mode="w+", dtype="float32", shape=(0, 1)).flush()
-        return out_path, uniq_list, row2uniq
+    if not seq_items:
+        if embed_dim is None:
+            raise ValueError("embed_dim must be provided when seqs is empty")
+        return (
+            torch.empty((0, max_length, embed_dim), dtype=torch.float32, device=device),
+            torch.empty((0, max_length), dtype=torch.float32, device=device),
+        )
 
-    # Model dim
-    D = enc.get_input_embeddings().embedding_dim
-    mem = np.memmap(out_path, mode="w+", dtype="float32", shape=(U, D))
-
-    # Build schedule (interleaved)
-    lengths = [len(s) for s in uniq_list]
-    window = max(batch_size * interleave_window_factor, batch_size)
-    schedule = _length_interleave_order(lengths, bin_size=window)
-
-    # Safe default token budget on MPS
-    if target_tokens is None and _device_is_mps(device):
-        target_tokens = 48_000  # conservative; reduces late spikes
-
-    # AMP only on CUDA (MPS AMP isn’t reliable for mem)
-    use_autocast = _device_is_cuda(device)
-    amp_dtype = (
-        torch.bfloat16
-        if next(enc.parameters()).dtype == torch.bfloat16
-        else torch.float16
+    logits_config = logits_config or LogitsConfig(
+        sequence=True, return_embeddings=True
     )
 
-    # Prepare batches
-    batches = list(_dynamic_batches(schedule, uniq_list, target_tokens, batch_size))
-    pbar = tqdm(range(len(batches)), total=len(batches), desc="Embedding (uniq→memmap)")
+    if seq_strings is not None:
+        seq_strings_list = [str(s or "") for s in seq_strings]
+    else:
+        seq_strings_list = []
+        for item in seq_items:
+            if isinstance(item, ESMProtein):
+                seq_strings_list.append(str(getattr(item, "sequence", "") or ""))
+            else:
+                seq_strings_list.append(str(item or ""))
 
-    # Utility: run a batch on a given device (cuda/mps/cpu)
-    def run_batch(cur_idxs: List[int], run_device: str | torch.device):
-        # free cache before moving
-        if _device_is_mps(run_device) or _device_is_cuda(run_device):
-            _empty_backend_cache_if_possible(run_device)
-        batch_seqs = [uniq_list[i] for i in cur_idxs]
-        toks = tok(
-            batch_seqs,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            add_special_tokens=True,
-        )
-        # move inputs
-        toks = {k: v.to(run_device) for k, v in toks.items()}
-
-        if _device_is_cuda(run_device) and use_autocast:
-            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=True):
-                out = enc.to(run_device)(**toks).last_hidden_state
+    proteins: List[ESMProtein] = []
+    for item, seq_str in zip(seq_items, seq_strings_list):
+        if isinstance(item, ESMProtein):
+            proteins.append(item)
         else:
-            out = enc.to(run_device)(**toks).last_hidden_state
+            proteins.append(ESMProtein(sequence=seq_str))
 
-        attn = toks["attention_mask"].unsqueeze(-1).to(out.dtype)
-        if pool == "cls":
-            z = out[:, 0, :]
-        else:
-            z = (out * attn).sum(1) / attn.sum(1).clamp_min(1e-6)
-        z_np = z.detach().to(torch.float32).cpu().numpy()
-        for k, u in enumerate(cur_idxs):
-            mem[u, :] = z_np[k]
-        # free cache after
-        _empty_backend_cache_if_possible(run_device)
-
-    # Walk batches with backoff and CPU fallback on MPS OOM
-    mps_fell_back_to_cpu = False
-    for bi in pbar:
-        idxs = batches[bi]
-        pending: List[List[int]] = [idxs]
-        while pending:
-            cur = pending.pop(0)
-            try:
-                run_batch(cur, device)
-            except RuntimeError as e:
-                msg = str(e).lower()
-                oomish = (
-                    ("out of memory" in msg)
-                    or ("mps backend out of memory" in msg)
-                    or ("cuda out of memory" in msg)
-                )
-                if oomish and len(cur) > 1:
-                    # split and retry both halves
-                    mid = len(cur) // 2
-                    pending.insert(0, cur[mid:])
-                    pending.insert(0, cur[:mid])
-                    _empty_backend_cache_if_possible(device)
-                    continue
-                # single item still OOM → if MPS, move model once to CPU and finish there
-                if oomish and _device_is_mps(device):
-                    if not mps_fell_back_to_cpu:
-                        print(
-                            "[embed] MPS OOM on single item; falling back to CPU for remaining work."
-                        )
-                        enc.to("cpu")
-                        mps_fell_back_to_cpu = True
-                    run_batch(cur, "cpu")
-                else:
-                    raise
-
-    mem.flush()
-    return out_path, uniq_list, row2uniq
+    try:
+        encoded = model.encode(proteins)
+        logits = model.logits(encoded, logits_config)
+        embeddings = logits.embeddings
+        mask = _extract_sequence_mask(encoded, logits, seq_strings_list, device)
+        if embeddings.ndim == 2:
+            embeddings = embeddings.unsqueeze(0)
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0)
+        embeddings = _pad_to_length(embeddings, max_length)
+        mask = _pad_to_length(mask, max_length)
+        return embeddings.to(torch.float32), mask.to(torch.float32)
+    except Exception:
+        all_embeddings: List[torch.Tensor] = []
+        all_masks: List[torch.Tensor] = []
+        for protein, seq_str in zip(proteins, seq_strings_list):
+            encoded_single = model.encode(protein)
+            logits_single = model.logits(encoded_single, logits_config)
+            emb = logits_single.embeddings
+            mask_single = _extract_sequence_mask(
+                encoded_single, logits_single, [seq_str], device
+            )
+            if emb.ndim == 2:
+                emb = emb.unsqueeze(0)
+            if mask_single.ndim == 1:
+                mask_single = mask_single.unsqueeze(0)
+            emb = _pad_to_length(emb, max_length)
+            mask_single = _pad_to_length(mask_single, max_length)
+            all_embeddings.append(emb)
+            all_masks.append(mask_single)
+        hidden = torch.cat(all_embeddings, dim=0)
+        masks = torch.cat(all_masks, dim=0)
+        return hidden.to(torch.float32), masks.to(torch.float32)
 
 
 # ============================================================
@@ -657,7 +589,7 @@ def process_and_cache_protein(
     out_meta: str,
     out_h5: str,
     device: Optional[str] = None,
-    model_id: str = "facebook/esm2_t33_650M_UR50D",
+    model_id: str = "esmc_600m",
     batch_size: int = 8,
     window: int = 127,
     max_length: int = 2048,
@@ -666,11 +598,10 @@ def process_and_cache_protein(
     archive_compression_opts: Optional[int] = None,
 ) -> tuple[pd.DataFrame, str]:
     """
-    Loads VEP-joined WT/MT sequences, embeds with ESM2 (unique-only with interleaved scheduling),
+    Loads VEP-joined WT/MT sequences, embeds with ESMC (unique-only with interleaved scheduling),
     saves an embedding archive (HDF5) + Feather (meta). Returns (kept_meta_df, out_h5_path).
 
     Memory behavior:
-      - Embeddings for UNIQUE sequences are written to disk memmaps (no big RAM spikes).
       - Batch sizes adapt to token budget and back off on OOM (esp. on MPS).
     """
     os.makedirs(os.path.dirname(out_meta), exist_ok=True)
@@ -700,7 +631,7 @@ def process_and_cache_protein(
     kept["seq_wt"] = wt_sanitized
     kept["seq_mt"] = mt_sanitized
 
-    target_seq_len = max(1, min(int(window), int(max_length) - 1))
+    target_seq_len = max(1, min(int(window), int(max_length)))
     print(
         f"[protein][cache] preparing windows: target_seq_len={target_seq_len} window_param={window} max_length={max_length}"
     )
@@ -739,9 +670,12 @@ def process_and_cache_protein(
     encoder_bundle: Optional[Tuple] = None
     archive_prepared = False
     if need_embed:
-        tok, enc, device = build_protein_encoder(model_id=model_id, device=device)
-        seq_len = max(1, min(int(target_seq_len), int(max_length) - 1))
-        D = enc.get_input_embeddings().embedding_dim
+        model, resolved_device, embed_dim = build_protein_encoder(
+            model_id=model_id, device=device
+        )
+        device = resolved_device
+        seq_len = max(1, min(int(target_seq_len), int(max_length)))
+        D = embed_dim
         N = len(kept)
         batch_rows = max(1, int(batch_size))
         print(
@@ -760,7 +694,8 @@ def process_and_cache_protein(
             compression_opts=archive_compression_opts,
         )
         archive_prepared = True
-        encoder_bundle = (tok, enc, device, seq_len, D, N, batch_rows)
+        logits_config = LogitsConfig(sequence=True, return_embeddings=True)
+        encoder_bundle = (model, device, seq_len, D, N, batch_rows, logits_config)
         with h5py.File(out_h5_path, "r") as store:
             compression_desc = store.attrs.get("compression", "unknown")
         print(
@@ -794,7 +729,7 @@ def process_and_cache_protein(
     kept["protein_frameshift"] = [bool(x) for x in frameshift_flags]
 
     if need_embed and encoder_bundle is not None:
-        tok, enc, device, seq_len, D, N, batch_rows = encoder_bundle
+        model, device, seq_len, D, N, batch_rows, logits_config = encoder_bundle
         indices = list(range(N))
         wt_seqs = [str(s) for s in kept["seq_wt"].tolist()]
         mt_seqs = [str(s) for s in kept["seq_mt"].tolist()]
@@ -850,11 +785,14 @@ def process_and_cache_protein(
 
                 combined = wt_batch + mt_batch
                 hidden, attn = encode_sequence_tokens(
-                    combined, enc, tok, device, max_length=seq_len + 1
+                    combined,
+                    model,
+                    device,
+                    seq_len,
+                    logits_config=logits_config,
+                    embed_dim=D,
+                    seq_strings=combined,
                 )
-
-                hidden = hidden[:, :seq_len, :]
-                attn = attn[:, :seq_len]
                 wt_hidden = (
                     hidden[:bsz, :, :]
                     .to(dtype=torch.float16)
