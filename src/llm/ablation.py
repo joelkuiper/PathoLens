@@ -482,6 +482,23 @@ def _with_cond_scale(seq_ds: Dict[str, Any], *, scale: float) -> Dict[str, Any]:
 # ----------------------------
 # Debug helpers
 # ----------------------------
+
+
+def _debug_item_to_numpy(item, vectorizer) -> np.ndarray:
+    """Return a flattened float32 numpy view of a dataset item."""
+
+    if isinstance(item, tuple):
+        item = item[0]
+
+    if isinstance(item, Mapping):
+        vec, _, _ = vectorizer.flatten(item)
+        tensor = vec.detach().cpu()
+    else:
+        tensor = torch.as_tensor(item).detach().cpu().reshape(-1).to(torch.float32)
+
+    return tensor.numpy().astype(np.float32, copy=False)
+
+
 def _debug_check_noise(
     ds_split, noise_std: Optional[float], noise_alpha: float, tag: str, n: int = 3
 ):
@@ -489,12 +506,11 @@ def _debug_check_noise(
         ds_split,
         _CondTransformCfg(mode="noise", noise_std=noise_std, noise_alpha=noise_alpha),
     )
+    vectorizer = view._vectorizer
     print(f"[debug:{tag}] noise_std={noise_std} noise_alpha={noise_alpha}")
     for i in range(min(n, len(ds_split))):
-        x0, *_ = ds_split[i]
-        v0 = x0.numpy().astype(np.float32, copy=False)
-        xm, *_ = view[i]
-        vm = xm.numpy().astype(np.float32, copy=False)
+        v0 = _debug_item_to_numpy(ds_split[i], vectorizer)
+        vm = _debug_item_to_numpy(view[i], vectorizer)
         sig = np.std(v0) + 1e-8
         nse = np.std(vm - v0) + 1e-8
         snr = (sig / nse) if nse > 0 else float("inf")
@@ -506,12 +522,11 @@ def _debug_check_noise(
 
 def _debug_check_scale(ds_split, scale: float, tag: str, n: int = 3):
     view = _TransformedSplit(ds_split, _CondTransformCfg(mode="scale", scale=scale))
+    vectorizer = view._vectorizer
     print(f"[debug:{tag}] scale={scale}")
     for i in range(min(n, len(ds_split))):
-        x0, *_ = ds_split[i]
-        v0 = x0.numpy().astype(np.float32, copy=False)
-        xm, *_ = view[i]
-        vm = xm.numpy().astype(np.float32, copy=False)
+        v0 = _debug_item_to_numpy(ds_split[i], vectorizer)
+        vm = _debug_item_to_numpy(view[i], vectorizer)
         print(
             f"[debug:{tag}] i={i} ||v||_2(before)={np.linalg.norm(v0):.4f} ||v||_2(after)={np.linalg.norm(vm):.4f}"
         )
