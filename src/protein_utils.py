@@ -909,8 +909,6 @@ def process_and_cache_protein(
                     if frameshift_ds is not None:
                         frameshift_ds[idxs_arr, :] = frameshift_batch
 
-                archive.flush()
-
             archive.store.attrs["complete"] = 1
             archive.flush()
         print(f"[protein][embeddings] wrote {out_h5_path} rows={N}")

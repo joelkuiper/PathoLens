@@ -667,8 +667,6 @@ def process_and_cache_dna(
                     if splice_mask_ds is not None:
                         splice_mask_ds[idxs_arr, :] = splice_batch
 
-                archive.flush()
-
             archive.store.attrs["complete"] = 1
             archive.flush()
         print(f"[dna][embeddings] wrote {out_h5_path} rows={len(kept_df)}")
