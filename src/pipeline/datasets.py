@@ -50,10 +50,16 @@ def build_sequence_datasets(
             use_protein=cfg.protein.enabled,
         )
         datasets[split] = ds
-        total_dim = ds.dna_dim + ds.protein_dim
+        spec = getattr(ds, "cond_spec", {})
+        dna_info = spec.get("dna", {})
+        prot_info = spec.get("protein", {})
+        dna_status = "on" if dna_info.get("enabled") else "off"
+        prot_status = "on" if prot_info.get("enabled") else "off"
         print(
-            f"[dataset] {split}: rows={len(ds)} dim(dna={ds.dna_dim}, protein={ds.protein_dim}) "
-            f"total={total_dim}"
+            f"[dataset] {split}: rows={len(ds)} dna={dna_status}"
+            f"(L={dna_info.get('seq_len', 0)} D={dna_info.get('embed_dim', 0)}) "
+            f"protein={prot_status}"
+            f"(L={prot_info.get('seq_len', 0)} D={prot_info.get('embed_dim', 0)})"
         )
         if ds.use_protein:
             print(f"[dataset] {split}: protein_coverage={ds.protein_coverage:.3f}")

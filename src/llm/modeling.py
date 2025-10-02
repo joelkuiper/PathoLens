@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,17 +48,13 @@ class CondProjector(nn.Module):
         p_drop: float = 0.10,
     ):
         super().__init__()
-        self.spec = dict(spec)
-        self.d_in = int(spec.get("total_dim", 0))
+        self.spec = self._normalise_spec(spec)
         self.d_out = int(d_out)
         self.k_requested = int(k)
         self.conv_dim = int(conv_dim)
         self.conv_layers = int(conv_layers)
         self.n_classes = int(n_classes)
         self.p_drop = float(p_drop)
-
-        if self.d_in <= 0:
-            raise ValueError("CondProjector requires positive input dimension")
 
         self.k_dna = 0
         self.k_prot = 0
@@ -68,9 +64,16 @@ class CondProjector(nn.Module):
         prot_spec = self.spec.get("protein", {})
 
         self.dna_encoder: Optional[SequenceCNNEncoder]
-        if dna_spec.get("slices") is not None and self.k_dna > 0:
-            extra = dna_spec.get("extra_masks", []) or []
-            scalar = 3 + len(extra)  # pos + edit + gap + extras
+        if dna_spec.get("enabled") and self.k_dna > 0:
+            extra = dna_spec.get("extra_mask_keys", []) or []
+            scalar = 0
+            if dna_spec.get("pos_key"):
+                scalar += 1
+            if dna_spec.get("edit_key"):
+                scalar += 1
+            if dna_spec.get("gap_key"):
+                scalar += 1
+            scalar += len(extra)
             self.dna_encoder = SequenceCNNEncoder(
                 embed_dim=int(dna_spec.get("embed_dim", 0)),
                 conv_dim=self.conv_dim,
@@ -82,9 +85,16 @@ class CondProjector(nn.Module):
         else:
             self.dna_encoder = None
 
-        if prot_spec.get("slices") is not None and self.k_prot > 0:
-            extra = prot_spec.get("extra_masks", []) or []
-            scalar = 3 + len(extra)  # pos + edit + gap + extras
+        if prot_spec.get("enabled") and self.k_prot > 0:
+            extra = prot_spec.get("extra_mask_keys", []) or []
+            scalar = 0
+            if prot_spec.get("pos_key"):
+                scalar += 1
+            if prot_spec.get("edit_key"):
+                scalar += 1
+            if prot_spec.get("gap_key"):
+                scalar += 1
+            scalar += len(extra)
             self.protein_encoder = SequenceCNNEncoder(
                 embed_dim=int(prot_spec.get("embed_dim", 0)),
                 conv_dim=self.conv_dim,
@@ -103,31 +113,42 @@ class CondProjector(nn.Module):
         self.dropout = nn.Dropout(self.p_drop)
         self.aux_head = nn.Linear(self.d_out, self.n_classes)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if x.dim() != 2 or x.size(-1) != self.d_in:
-            raise ValueError(
-                f"CondProjector expected input shape (B, {self.d_in}), got {tuple(x.shape)}"
-            )
+    def forward(
+        self, conditioning: Mapping[str, Mapping[str, torch.Tensor]]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not isinstance(conditioning, Mapping):
+            raise TypeError("CondProjector expects a mapping of modalities to tensors")
 
         compute_dtype = self.aux_head.weight.dtype
         device = next(self.parameters()).device
-        x = x.to(device=device, dtype=compute_dtype)
 
         tokens: list[torch.Tensor] = []
 
         if self.dna_encoder is not None:
-            dna_inputs = self._build_sequence_inputs(
-                x, self.spec["dna"], modality="dna"
+            dna_fields = conditioning.get("dna")
+            if dna_fields is None:
+                raise KeyError("Conditioning is missing 'dna' modality")
+            dna_inputs = self._prepare_sequence_inputs(
+                dna_fields,
+                self.spec["dna"],
+                modality="dna",
+                device=device,
+                dtype=compute_dtype,
             )
-            dna_tokens = self.dna_encoder(dna_inputs)
-            tokens.append(dna_tokens)
+            tokens.append(self.dna_encoder(dna_inputs))
 
         if self.protein_encoder is not None:
-            prot_inputs = self._build_sequence_inputs(
-                x, self.spec["protein"], modality="protein"
+            prot_fields = conditioning.get("protein")
+            if prot_fields is None:
+                raise KeyError("Conditioning is missing 'protein' modality")
+            prot_inputs = self._prepare_sequence_inputs(
+                prot_fields,
+                self.spec["protein"],
+                modality="protein",
+                device=device,
+                dtype=compute_dtype,
             )
-            prot_tokens = self.protein_encoder(prot_inputs)
-            tokens.append(prot_tokens)
+            tokens.append(self.protein_encoder(prot_inputs))
 
         if not tokens:
             raise RuntimeError("No conditioning modalities available for CondProjector")
@@ -140,43 +161,81 @@ class CondProjector(nn.Module):
         aux_logits = self.aux_head(pooled)
         return out_tokens, aux_logits
 
-    def _build_sequence_inputs(
-        self, cond_vec: torch.Tensor, spec_section: Dict[str, Any], *, modality: str
+    def _prepare_sequence_inputs(
+        self,
+        fields: Mapping[str, torch.Tensor],
+        spec_section: Dict[str, Any],
+        *,
+        modality: str,
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> SequenceInputs:
-        slices = spec_section.get("slices")
-        if slices is None:
-            raise RuntimeError(f"Spec for {modality} missing slices")
-        B = cond_vec.size(0)
-        L = int(spec_section.get("seq_len", 0))
-        D = int(spec_section.get("embed_dim", 0))
-        if L == 0 or D == 0:
-            raise RuntimeError(f"Invalid sequence dimensions for {modality}")
+        if not spec_section.get("enabled"):
+            raise RuntimeError(f"Spec for {modality} modality is disabled")
 
-        if modality == "protein":
-            wt_key, mt_key = "wt_tokens", "mt_tokens"
-            mask_keys = ("wt_mask", "mt_mask")
-        else:
-            wt_key, mt_key = "ref_tokens", "alt_tokens"
-            mask_keys = ("ref_mask", "alt_mask")
+        token_keys = spec_section.get("token_keys") or {}
+        mask_keys = spec_section.get("mask_keys") or {}
+        wt_key = token_keys.get("wt")
+        mt_key = token_keys.get("mt")
+        if wt_key is None or mt_key is None:
+            raise KeyError(f"Spec for {modality} missing token key mapping")
+        mask_wt = mask_keys.get("wt")
+        mask_mt = mask_keys.get("mt")
+        if mask_wt is None or mask_mt is None:
+            raise KeyError(f"Spec for {modality} missing mask key mapping")
 
-        wt = cond_vec[:, slices[wt_key]].view(B, L, D)
-        mt = cond_vec[:, slices[mt_key]].view(B, L, D)
-        mask_a = cond_vec[:, slices[mask_keys[0]]].view(B, L)
-        mask_b = cond_vec[:, slices[mask_keys[1]]].view(B, L)
+        def _ensure_batch(tensor: torch.Tensor, dims: int) -> torch.Tensor:
+            if tensor.dim() == dims:
+                return tensor
+            if tensor.dim() == dims - 1:
+                return tensor.unsqueeze(0)
+            raise ValueError(
+                f"Expected tensor with {dims} dims (or {dims-1} without batch) for {modality}, got {tensor.shape}"
+            )
+
+        wt = torch.as_tensor(fields[wt_key])
+        mt = torch.as_tensor(fields[mt_key])
+        wt = _ensure_batch(wt, 3).to(device=device, dtype=dtype)
+        mt = _ensure_batch(mt, 3).to(device=device, dtype=dtype)
+
+        mask_a = torch.as_tensor(fields[mask_wt])
+        mask_b = torch.as_tensor(fields[mask_mt])
+        mask_a = _ensure_batch(mask_a, 2).to(device=device, dtype=dtype)
+        mask_b = _ensure_batch(mask_b, 2).to(device=device, dtype=dtype)
         mask = torch.clamp(mask_a + mask_b, 0.0, 1.0)
-        edit_mask = cond_vec[:, slices["edit_mask"]].view(B, L, 1)
-        gap_mask = cond_vec[:, slices["gap_mask"]].view(B, L, 1)
-        pos_slice = slices.get("pos")
-        pos = (
-            cond_vec[:, pos_slice].view(B, L, 1)
-            if pos_slice is not None
-            else torch.zeros_like(edit_mask)
-        )
+
+        def _optional_scalar(key: Optional[str]) -> Optional[torch.Tensor]:
+            if not key or key not in fields:
+                return None
+            tensor = torch.as_tensor(fields[key])
+            tensor = _ensure_batch(tensor, 2).to(device=device, dtype=dtype)
+            return tensor.unsqueeze(-1)
+
+        edit_mask = _optional_scalar(spec_section.get("edit_key"))
+        gap_mask = _optional_scalar(spec_section.get("gap_key"))
+
+        pos_tensor: Optional[torch.Tensor] = None
+        pos_key = spec_section.get("pos_key")
+        if pos_key and pos_key in fields:
+            pos = torch.as_tensor(fields[pos_key])
+            if pos.dim() == 1:
+                pos = pos.unsqueeze(0)
+            if pos.dim() == 2:
+                pos = pos.unsqueeze(-1)
+            elif pos.dim() == 3 and pos.size(-1) == 1:
+                pass
+            else:
+                raise ValueError(
+                    f"Position tensor for {modality} must have shape [B, L] or [B, L, 1]; got {pos.shape}"
+                )
+            pos_tensor = pos.to(device=device, dtype=dtype)
+
         extra_masks: list[torch.Tensor] = []
-        for key in spec_section.get("extra_masks", []) or []:
-            sl = slices.get(key)
-            if sl is not None:
-                extra_masks.append(cond_vec[:, sl].view(B, L, 1))
+        for key in spec_section.get("extra_mask_keys", []) or []:
+            if key in fields:
+                extra = torch.as_tensor(fields[key])
+                extra = _ensure_batch(extra, 2).to(device=device, dtype=dtype)
+                extra_masks.append(extra.unsqueeze(-1))
 
         return SequenceInputs(
             wt=wt,
@@ -185,15 +244,15 @@ class CondProjector(nn.Module):
             edit_mask=edit_mask,
             gap_mask=gap_mask,
             extra_masks=extra_masks if extra_masks else None,
-            pos=pos,
+            pos=pos_tensor,
         )
 
     def _assign_tokens(self, k_total: int) -> None:
         if k_total <= 0:
             raise ValueError("Number of conditioning tokens must be positive")
         remaining = k_total
-        has_dna = self.spec.get("dna", {}).get("slices") is not None
-        has_prot = self.spec.get("protein", {}).get("slices") is not None
+        has_dna = bool(self.spec.get("dna", {}).get("enabled"))
+        has_prot = bool(self.spec.get("protein", {}).get("enabled"))
 
         self.k_dna = 0
         self.k_prot = 0
@@ -220,76 +279,23 @@ class CondProjector(nn.Module):
     # Serialization helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _slice_to_tuple(slc: Optional[slice]) -> Optional[tuple[int, int]]:
-        if slc is None:
-            return None
-        return (int(slc.start), int(slc.stop))
+    def _normalise_spec(data: Dict[str, Any]) -> Dict[str, Any]:
+        def convert(obj: Any):
+            if isinstance(obj, dict):
+                return {str(k): convert(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [convert(v) for v in obj]
+            return obj
+
+        return convert(dict(data))
 
     @classmethod
     def _serialise_spec(cls, spec: Dict[str, Any]) -> Dict[str, Any]:
-        def _map(
-            section: Optional[Dict[str, slice]],
-        ) -> Optional[Dict[str, tuple[int, int]]]:
-            if section is None:
-                return None
-            return {k: cls._slice_to_tuple(v) for k, v in section.items()}
-
-        return {
-            "total_dim": int(spec.get("total_dim", 0)),
-            "dna": {
-                "seq_len": int(spec.get("dna", {}).get("seq_len", 0)),
-                "embed_dim": int(spec.get("dna", {}).get("embed_dim", 0)),
-                "slices": _map(spec.get("dna", {}).get("slices")),
-                "extra_masks": list(spec.get("dna", {}).get("extra_masks", []) or []),
-            },
-            "protein": {
-                "seq_len": int(spec.get("protein", {}).get("seq_len", 0)),
-                "embed_dim": int(spec.get("protein", {}).get("embed_dim", 0)),
-                "slices": _map(spec.get("protein", {}).get("slices")),
-                "extra_masks": list(
-                    spec.get("protein", {}).get("extra_masks", []) or []
-                ),
-            },
-        }
-
-    @staticmethod
-    def _tuple_to_slice(t: Optional[tuple[int, int]]) -> Optional[slice]:
-        if t is None:
-            return None
-        return slice(int(t[0]), int(t[1]))
+        return cls._normalise_spec(spec)
 
     @classmethod
     def _deserialise_spec(cls, cfg: Dict[str, Any]) -> Dict[str, Any]:
-        spec = {
-            "total_dim": int(cfg.get("total_dim", 0)),
-            "dna": {
-                "seq_len": int(cfg.get("dna", {}).get("seq_len", 0)),
-                "embed_dim": int(cfg.get("dna", {}).get("embed_dim", 0)),
-                "slices": None,
-                "extra_masks": list(cfg.get("dna", {}).get("extra_masks", []) or []),
-            },
-            "protein": {
-                "seq_len": int(cfg.get("protein", {}).get("seq_len", 0)),
-                "embed_dim": int(cfg.get("protein", {}).get("embed_dim", 0)),
-                "slices": None,
-                "extra_masks": list(
-                    cfg.get("protein", {}).get("extra_masks", []) or []
-                ),
-            },
-        }
-        dna_slices_cfg = cfg.get("dna", {}).get("slices")
-        if dna_slices_cfg is not None:
-            spec["dna"]["slices"] = {
-                k: cls._tuple_to_slice(tuple(v) if v is not None else None)
-                for k, v in dna_slices_cfg.items()
-            }
-        protein_slices_cfg = cfg.get("protein", {}).get("slices")
-        if protein_slices_cfg is not None:
-            spec["protein"]["slices"] = {
-                k: cls._tuple_to_slice(tuple(v) if v is not None else None)
-                for k, v in protein_slices_cfg.items()
-            }
-        return spec
+        return cls._normalise_spec(cfg)
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -303,7 +309,6 @@ class CondProjector(nn.Module):
             "p_drop": self.p_drop,
             "conv_dim": self.conv_dim,
             "conv_layers": self.conv_layers,
-            "d_in": self.d_in,
             "model_cls": self.__class__.__name__,
             "module": self.__class__.__module__,
         }
@@ -326,7 +331,6 @@ class CondProjector(nn.Module):
         cfg.pop("model_cls", None)
         cfg.pop("module", None)
         spec_cfg = cfg.pop("spec")
-        cfg.pop("d_in", None)
         spec = cls._deserialise_spec(spec_cfg)
         return cls(spec=spec, **cfg)
 

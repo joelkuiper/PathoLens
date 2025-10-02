@@ -7,17 +7,11 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from src.dna_utils import (
-    compute_dna_slices,
-    load_dna_archive,
-    validate_dna_indices,
-    write_dna_features,
-)
+from src.dna_utils import load_dna_archive, read_dna_features, validate_dna_indices
 from src.protein_utils import (
-    compute_protein_slices,
     load_protein_archive,
+    read_protein_features,
     validate_protein_indices,
-    write_protein_features,
 )
 
 
@@ -79,9 +73,8 @@ class SequenceTowerDataset(Dataset):
         self._dna_datasets: Mapping[str, Any] | Dict[str, Any] = {}
         self.dna_seq_len = 0
         self.dna_embed_dim = 0
-        self.D_eff = 0
-        self.dna_dim = 0
         self._dna_idx: Optional[np.ndarray] = None
+        self.dna_extra_masks: list[str] = []
 
         if self.use_dna:
             if "dna_embedding_idx" not in self.meta.columns:
@@ -101,6 +94,18 @@ class SequenceTowerDataset(Dataset):
             ) = load_dna_archive(dna_h5)
             N_full = int(self._dna_datasets["ref_tokens"].shape[0])
             validate_dna_indices(self._dna_idx, N_full)
+            self.dna_extra_masks = self._detect_extra_masks(
+                self._dna_datasets,
+                base_keys={
+                    "ref_tokens",
+                    "alt_tokens",
+                    "ref_mask",
+                    "alt_mask",
+                    "edit_mask",
+                    "gap_mask",
+                    "pos",
+                },
+            )
 
         # ---- labels ----
         self.make_label = bool(make_label)
@@ -124,10 +129,9 @@ class SequenceTowerDataset(Dataset):
         self._prot_datasets: Mapping[str, Any] | Dict[str, Any] = {}
         self.prot_seq_len = 0
         self.prot_embed_dim = 0
-        self.D_prot = 0
-        self.protein_dim = 0
         self._prot_idx: Optional[np.ndarray] = None
         self.protein_coverage = 0.0
+        self.protein_extra_masks: list[str] = []
 
         if self.use_protein:
             if "protein_embedding_idx" not in self.meta.columns:
@@ -147,62 +151,50 @@ class SequenceTowerDataset(Dataset):
             self._prot_idx = protein_idx_series.to_numpy(dtype=np.int64)
             prot_rows = int(self._prot_datasets["wt_tokens"].shape[0])
             self.protein_coverage = validate_protein_indices(self._prot_idx, prot_rows)
-
-        # Build global slices for conditioning vector layout
-        self.cond_slices: dict[str, Optional[dict[str, slice] | slice]] = {}
-        offset = 0
-
-        dna_slices: Optional[dict[str, slice]] = None
-        dna_block_slice = slice(offset, offset)
-        if self.use_dna and self.dna_seq_len > 0 and self.dna_embed_dim > 0:
-            dna_slices, dna_block_slice, offset = compute_dna_slices(
-                self.dna_seq_len, self.dna_embed_dim, offset
+            self.protein_extra_masks = self._detect_extra_masks(
+                self._prot_datasets,
+                base_keys={
+                    "wt_tokens",
+                    "mt_tokens",
+                    "wt_mask",
+                    "mt_mask",
+                    "edit_mask",
+                    "gap_mask",
+                    "pos",
+                },
             )
-            self.D_eff = dna_block_slice.stop - dna_block_slice.start
-            self.dna_dim = self.D_eff
-        else:
-            self.D_eff = 0
-            self.dna_dim = 0
-        self.cond_slices["dna"] = dna_slices
-
-        prot_slices: Optional[dict[str, slice]] = None
-        prot_block_slice = slice(offset, offset)
-        if self.use_protein and self.prot_seq_len > 0 and self.prot_embed_dim > 0:
-            prot_slices, prot_block_slice, offset = compute_protein_slices(
-                self.prot_seq_len, self.prot_embed_dim, offset
-            )
-            self.D_prot = prot_block_slice.stop - prot_block_slice.start
-            self.protein_dim = self.D_prot
-        else:
-            self.D_prot = 0
-            self.protein_dim = 0
-        self.cond_slices["protein"] = prot_slices
-        self.total_dim = offset
-
-        dna_extra = []
-        if dna_slices and "splice_mask" in dna_slices:
-            dna_extra.append("splice_mask")
-        prot_extra = []
-        if prot_slices and "frameshift_mask" in prot_slices:
-            prot_extra.append("frameshift_mask")
 
         self.cond_spec: dict[str, Any] = {
-            "dna": {
-                "seq_len": self.dna_seq_len,
-                "embed_dim": self.dna_embed_dim,
-                "slice": dna_block_slice if self.D_eff > 0 else None,
-                "slices": dna_slices,
-                "extra_masks": dna_extra,
-            },
-            "protein": {
-                "seq_len": self.prot_seq_len,
-                "embed_dim": self.prot_embed_dim,
-                "slice": prot_block_slice if self.D_prot > 0 else None,
-                "slices": prot_slices,
-                "extra_masks": prot_extra,
-            },
-            "total_dim": self.total_dim,
+            "version": 2,
+            "dna": self._make_modality_spec(
+                enabled=self.use_dna,
+                seq_len=self.dna_seq_len,
+                embed_dim=self.dna_embed_dim,
+                datasets=self._dna_datasets,
+                token_keys=("ref_tokens", "alt_tokens"),
+                mask_keys=("ref_mask", "alt_mask"),
+                edit_key="edit_mask",
+                gap_key="gap_mask",
+                pos_key="pos",
+                extra_masks=self.dna_extra_masks,
+            ),
+            "protein": self._make_modality_spec(
+                enabled=self.use_protein,
+                seq_len=self.prot_seq_len,
+                embed_dim=self.prot_embed_dim,
+                datasets=self._prot_datasets,
+                token_keys=("wt_tokens", "mt_tokens"),
+                mask_keys=("wt_mask", "mt_mask"),
+                edit_key="edit_mask",
+                gap_key="gap_mask",
+                pos_key="pos",
+                extra_masks=self.protein_extra_masks,
+            ),
         }
+        enabled_modalities = [
+            name for name, info in self.cond_spec.items() if isinstance(info, dict) and info.get("enabled")
+        ]
+        self.cond_spec["modalities"] = [m for m in enabled_modalities if m in {"dna", "protein"}]
 
     # -----------------
     # Dataset protocol
@@ -210,31 +202,29 @@ class SequenceTowerDataset(Dataset):
     def __len__(self) -> int:
         return len(self.meta)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        x_np = np.zeros(self.total_dim, dtype="float32")
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[Dict[str, Dict[str, torch.Tensor]], Optional[torch.Tensor]]:
+        conditioning: Dict[str, Dict[str, torch.Tensor]] = {}
 
-        dna_slice = self.cond_slices.get("dna")
-        if self.use_dna and dna_slice is not None and self._dna_idx is not None:
+        if self.use_dna and self._dna_idx is not None:
             dna_idx = int(self._dna_idx[idx])
-            write_dna_features(x_np, dna_slice, dna_idx, self._dna_datasets)
+            conditioning["dna"] = read_dna_features(self._dna_datasets, dna_idx)
 
-        prot_slice = self.cond_slices.get("protein")
-        if (
-            self.use_protein
-            and prot_slice is not None
-            and self.D_prot > 0
-            and self._prot_idx is not None
-        ):
+        if self.use_protein and self._prot_idx is not None:
             prot_idx = int(self._prot_idx[idx])
-            write_protein_features(x_np, prot_slice, prot_idx, self._prot_datasets)
+            conditioning["protein"] = read_protein_features(
+                self._prot_datasets, prot_idx
+            )
 
-        x = torch.from_numpy(x_np)
+        if not conditioning:
+            raise RuntimeError("No conditioning modalities available for this sample")
 
         y = None
         if self.make_label and self._labels is not None:
             y = torch.tensor(int(self._labels[idx]), dtype=torch.long)
 
-        return x, y
+        return conditioning, y
 
     # -----------------
     # Resource handling
@@ -254,3 +244,77 @@ class SequenceTowerDataset(Dataset):
             self.close()
         except Exception:
             pass
+
+    @staticmethod
+    def _detect_extra_masks(
+        datasets: Mapping[str, Any], *, base_keys: set[str]
+    ) -> list[str]:
+        extras: list[str] = []
+        for name in datasets.keys():
+            if name in base_keys:
+                continue
+            if name.endswith("_mask"):
+                extras.append(str(name))
+        return sorted(extras)
+
+    @staticmethod
+    def _make_modality_spec(
+        *,
+        enabled: bool,
+        seq_len: int,
+        embed_dim: int,
+        datasets: Mapping[str, Any],
+        token_keys: tuple[str, str],
+        mask_keys: tuple[str, str],
+        edit_key: Optional[str],
+        gap_key: Optional[str],
+        pos_key: Optional[str],
+        extra_masks: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
+        present = bool(enabled and seq_len > 0 and embed_dim > 0 and datasets)
+
+        def _present(key: Optional[str]) -> Optional[str]:
+            if key is None:
+                return None
+            return key if key in datasets else None
+
+        feature_shapes = {
+            str(name): [int(dim) for dim in datasets[name].shape[1:]]
+            for name in datasets
+        }
+        feature_dtypes = {str(name): str(datasets[name].dtype) for name in datasets}
+
+        token_present = all(key in datasets for key in token_keys)
+        mask_present = all(key in datasets for key in mask_keys)
+
+        spec: Dict[str, Any] = {
+            "enabled": present,
+            "seq_len": int(seq_len),
+            "embed_dim": int(embed_dim),
+            "feature_shapes": feature_shapes,
+            "feature_dtypes": feature_dtypes,
+            "token_keys": {
+                "wt": token_keys[0],
+                "mt": token_keys[1],
+            }
+            if token_present
+            else None,
+            "mask_keys": {
+                "wt": mask_keys[0],
+                "mt": mask_keys[1],
+            }
+            if mask_present
+            else None,
+            "edit_key": _present(edit_key),
+            "gap_key": _present(gap_key),
+            "pos_key": _present(pos_key),
+        }
+
+        if extra_masks:
+            spec["extra_mask_keys"] = [
+                key for key in extra_masks if key in datasets
+            ]
+        else:
+            spec["extra_mask_keys"] = []
+
+        return spec

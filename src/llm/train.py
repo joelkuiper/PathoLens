@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -22,8 +23,36 @@ from transformers import (
 
 from .config import LLMRunConfig, set_all_seeds
 from .modeling import build_qwen_with_lora
-from .data import CondDataset, make_collator
+from .data import CondDataset, make_collator, conditioning_to
 from .context import build_ctx_from_row
+
+
+def _log_batch_tree(key: str, value: Any, indent: str = "  ") -> None:
+    """Pretty-print nested batch structures for smoke debugging."""
+
+    prefix = indent + key if key else indent.rstrip()
+    if isinstance(value, Mapping):
+        print(f"{prefix}:")
+        for sub_key, sub_value in value.items():
+            _log_batch_tree(str(sub_key), sub_value, indent + "  ")
+        return
+
+    shape_attr = getattr(value, "shape", None)
+    if shape_attr is None:
+        if isinstance(value, (list, tuple)):
+            shape = (len(value),)
+        else:
+            shape = ()
+    elif isinstance(shape_attr, (list, tuple)):
+        shape = tuple(shape_attr)
+    else:
+        try:
+            shape = tuple(shape_attr)
+        except TypeError:
+            shape = (int(shape_attr),)
+
+    dtype = getattr(value, "dtype", None)
+    print(f"{prefix}: shape={shape} dtype={dtype}")
 
 
 class CondTrainer(Trainer):
@@ -107,7 +136,7 @@ class CondTrainer(Trainer):
         attention_mask = inputs.pop("attention_mask", None)
         labels = inputs.pop("labels", None)
         label_weights = inputs.pop("label_weights", None)
-        cond_vec = inputs.pop("cond_vec")
+        conditioning = inputs.pop("conditioning")
         gold_y = inputs.pop("_y", None)
         if gold_y is None:
             raise KeyError(
@@ -120,18 +149,6 @@ class CondTrainer(Trainer):
                 f"CondTrainer expects '_y' dtype torch.long but received {gold_y.dtype}."
             )
 
-        # ===== fast dimension guard  =====
-        cond_proj = getattr(model, "cond_projector", None)
-        expected_d = getattr(cond_proj, "d_in", None)
-        if expected_d is not None:
-            exp = int(expected_d)
-            got = int(cond_vec.shape[-1])
-            if got != exp:
-                raise RuntimeError(
-                    f"[CondTrainer] cond_vec dim mismatch: got {got}, expected {exp}. "
-                    "Check D_eff/D_prot in dataset vs projector build."
-                )
-
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
@@ -140,10 +157,12 @@ class CondTrainer(Trainer):
         # -------------------
         tok_emb = model.get_input_embeddings()
         txt_emb = tok_emb(input_ids)
-        cond_vec = cond_vec.to(device=txt_emb.device, dtype=txt_emb.dtype)
+        conditioning = conditioning_to(
+            conditioning, device=txt_emb.device, dtype=txt_emb.dtype
+        )
 
         # Projector
-        cond_emb, aux_logits = model.cond_projector(cond_vec)
+        cond_emb, aux_logits = model.cond_projector(conditioning)
         if aux_logits is None:
             raise RuntimeError(
                 "cond_projector must return auxiliary logits when '_y' supervision is provided."
@@ -393,10 +412,14 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
 
     # --- Conditioning dims from training dataset ---
     ds_tr = seq_ds_dict["train"]
-    D_eff = int(getattr(ds_tr, "D_eff"))
-    D_prot = int(getattr(ds_tr, "D_prot", 0) or 0)
-    D_cond = D_eff + D_prot
-    print(f"[SMOKE] D_eff={D_eff}  D_prot={D_prot}  → D_cond={D_cond}")
+    cond_spec = getattr(ds_tr, "cond_spec", {})
+    dna_info = cond_spec.get("dna", {})
+    prot_info = cond_spec.get("protein", {})
+    print(
+        "[SMOKE] Conditioning summary: "
+        f"dna(enabled={dna_info.get('enabled')}, L={dna_info.get('seq_len', 0)}, D={dna_info.get('embed_dim', 0)}) | "
+        f"protein(enabled={prot_info.get('enabled')}, L={prot_info.get('seq_len', 0)}, D={prot_info.get('embed_dim', 0)})"
+    )
 
     # --- Special tokens must be single ids ---
     def _single_id(token: str) -> int:
@@ -447,13 +470,27 @@ def smoke_checks(seq_ds_dict: Dict[str, object], tokenizer, cfg: "LLMRunConfig")
     )
 
     # --- First item feature sanity ---
-    x0, *_ = ds_tr[0]
-    x0 = x0 if isinstance(x0, np.ndarray) else x0.numpy()
-    finite = np.isfinite(x0)
-    print(
-        f"[SMOKE] First feature vector: shape={tuple(x0.shape)}  finite%={(finite.mean() * 100):.2f}%  "
-        f"min={np.nanmin(x0):.4f}  max={np.nanmax(x0):.4f}"
-    )
+    cond0, y0 = ds_tr[0]
+    print("[SMOKE] First conditioning sample:")
+    for modality, fields in cond0.items():
+        print(f"  - {modality}:")
+        for key, value in fields.items():
+            tensor = torch.as_tensor(value)
+            stats = (
+                (
+                    float(tensor.float().mean()),
+                    float(tensor.float().min()),
+                    float(tensor.float().max()),
+                )
+                if tensor.numel()
+                else (0.0, 0.0, 0.0)
+            )
+            print(
+                f"      {key}: shape={tuple(tensor.shape)} mean={stats[0]:.4f} "
+                f"min={stats[1]:.4f} max={stats[2]:.4f}"
+            )
+    if y0 is not None:
+        print(f"[SMOKE] First label tensor: {y0}")
 
     print("========== END SMOKE CHECKS ==========\n")
 
@@ -463,17 +500,17 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     out_dir.mkdir(parents=True, exist_ok=True)
     set_all_seeds(cfg.seed)
 
-    # Compute conditioning dim from dataset (DNA + protein)
+    # Conditioning schema from dataset (DNA + protein)
     train_split = seq_ds["train"]
-    D_eff = int(train_split.D_eff)
-    D_prot = int(train_split.D_prot)
     cond_spec = getattr(train_split, "cond_spec", None)
     if cond_spec is None:
         raise RuntimeError(
             "SequenceTowerDataset must expose 'cond_spec' for projector build"
         )
-    D_cond = int(cond_spec.get("total_dim", D_eff + D_prot))
-    print(f"[INFO] LLM pipeline: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
+    print(
+        "[INFO] LLM pipeline conditioning: "
+        f"modalities={cond_spec.get('modalities', [])}"
+    )
 
     # build model with matching projector input
     tok, base_model, projector = build_qwen_with_lora(cfg, cond_spec)
@@ -485,11 +522,6 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     print("[DEBUG] Building CondDataset(train/val) ...")
     train_ds = CondDataset(seq_ds["train"], tokenizer=tok)
     val_ds = CondDataset(seq_ds["val"], tokenizer=tok)
-    # sanity: dataset D_cond must match projector's in_features
-    assert train_ds.D_cond == D_cond == val_ds.D_cond == projector.d_in, (
-        f"D_cond mismatch: dataset(train)={train_ds.D_cond}, dataset(val)={val_ds.D_cond}, "
-        f"projector_in={projector.d_in}"
-    )
 
     collator = make_collator(tok, max_len=cfg.max_len)
     smoke_cb = _DeferredSmokeChecks(lambda: smoke_checks(seq_ds, tok, cfg))
@@ -554,7 +586,7 @@ def run_llm_pipeline(cfg: LLMRunConfig, seq_ds: Dict[str, object]) -> Dict[str, 
     batch = next(iter(trainer.get_train_dataloader()))
     print(f"[DEBUG] Got first batch in {time.time() - t0:.2f}s")
     for k, v in batch.items():
-        print(f"  {k}: shape={tuple(v.shape)} dtype={getattr(v, 'dtype', None)}")
+        _log_batch_tree(str(k), v)
 
     trainer.train()
 

@@ -1,7 +1,7 @@
 # src/llm/data.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 import time
 import numpy as np
 import torch
@@ -21,6 +21,50 @@ def row_to_example(meta_row) -> Tuple[str, str]:
 
 
 # ---------- Dataset ----------
+def stack_conditioning_tensors(
+    conditionings: Sequence[Mapping[str, Mapping[str, torch.Tensor | np.ndarray]]]
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Stack per-example conditioning dicts into batched tensors."""
+
+    aggregated: Dict[str, Dict[str, list[torch.Tensor]]] = {}
+    for cond in conditionings:
+        for modality, fields in cond.items():
+            mod_store = aggregated.setdefault(modality, {})
+            for key, value in fields.items():
+                tensor = torch.as_tensor(value)
+                mod_store.setdefault(key, []).append(tensor)
+
+    stacked: Dict[str, Dict[str, torch.Tensor]] = {}
+    for modality, fields in aggregated.items():
+        stacked[modality] = {
+            key: torch.stack(tensors, dim=0)
+            for key, tensors in fields.items()
+        }
+    return stacked
+
+
+def conditioning_to(
+    conditioning: Mapping[str, Mapping[str, torch.Tensor | np.ndarray]],
+    *,
+    device: torch.device,
+    dtype: Optional[torch.dtype] = None,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Move a conditioning mapping onto ``device`` and cast float tensors."""
+
+    out: Dict[str, Dict[str, torch.Tensor]] = {}
+    for modality, fields in conditioning.items():
+        mod_out: Dict[str, torch.Tensor] = {}
+        for key, value in fields.items():
+            tensor = torch.as_tensor(value)
+            if torch.is_floating_point(tensor):
+                target_dtype = dtype or tensor.dtype
+                mod_out[key] = tensor.to(device=device, dtype=target_dtype)
+            else:
+                mod_out[key] = tensor.to(device=device)
+        out[modality] = mod_out
+    return out
+
+
 class CondDataset(Dataset):
     """
     Builds conditioning vectors from SequenceTowerDataset samples.
@@ -43,42 +87,21 @@ class CondDataset(Dataset):
             )
 
         self.cond_spec = spec
-
-        def _slice_len(value):
-            if value is None:
-                return 0
-            if isinstance(value, slice):
-                start = 0 if value.start is None else int(value.start)
-                stop = start if value.stop is None else int(value.stop)
-                return int(stop - start)
-            raise TypeError(f"Unexpected slice type in cond_spec: {type(value)!r}")
-
-        dna_info = spec.get("dna", {})
-        prot_info = spec.get("protein", {})
-
-        self.D_dna = _slice_len(dna_info.get("slice"))
-        self.D_prot = _slice_len(prot_info.get("slice"))
-        self.D_cond = int(spec.get("total_dim", 0))
-        if self.D_cond <= 0:
-            # Fallback to explicit sum if total_dim missing or zero
-            self.D_cond = self.D_dna + self.D_prot
-
+        modalities = spec.get("modalities", [])
         print(
-            "[DEBUG] CondDataset: "
-            f"D_dna={self.D_dna} D_prot={self.D_prot} "
-            f"=> D_cond={self.D_cond} | Build time: {time.time() - t0:.2f}s"
+            "[DEBUG] CondDataset: modalities="
+            f"{modalities} | Build time: {time.time() - t0:.2f}s"
         )
 
     def __len__(self):
         return len(self.seq_ds)
 
     def __getitem__(self, i: int):
-        x, *_ = self.seq_ds[i]  # v contains [dna | prot]
-        x = x if isinstance(x, np.ndarray) else x.numpy()
-        x = x.astype("float32", copy=False)
-
-        # Slice *exactly* the conditioning span
-        cond = x[: self.D_cond]
+        conditioning, *_ = self.seq_ds[i]
+        if not isinstance(conditioning, Mapping):
+            raise TypeError(
+                "Sequence dataset must return a mapping of modalities for conditioning"
+            )
 
         meta_row = self.meta.iloc[i]
         prompt, target = row_to_example(meta_row)
@@ -86,7 +109,12 @@ class CondDataset(Dataset):
             raise KeyError("CondDataset requires '_y' label in metadata.")
         y = int(meta_row.get("_y"))
 
-        return {"cond_vec": cond, "prompt": prompt, "target": target, "_y": y}
+        return {
+            "conditioning": conditioning,
+            "prompt": prompt,
+            "target": target,
+            "_y": y,
+        }
 
 
 def make_collator(
@@ -192,8 +220,8 @@ def make_collator(
                     label_weights[i, j:k2] = 0.0
                     seek_from = k2
 
-        cond_vec = torch.from_numpy(
-            np.stack([b["cond_vec"] for b in batch]).astype("float32")
+        conditioning = stack_conditioning_tensors(
+            [b["conditioning"] for b in batch]
         )
         try:
             gold_y = torch.tensor([int(b["_y"]) for b in batch], dtype=torch.long)
@@ -212,7 +240,7 @@ def make_collator(
             "attention_mask": attn_mask,
             "labels": labels,
             "label_weights": label_weights,
-            "cond_vec": cond_vec,
+            "conditioning": conditioning,
             "_y": gold_y,
         }
 

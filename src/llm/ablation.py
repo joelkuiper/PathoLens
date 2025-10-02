@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from dataclasses import dataclass
 from contextlib import contextmanager
-from typing import Dict, Any, Optional, Tuple, List, Sequence
+from typing import Dict, Any, Optional, Tuple, List, Sequence, Mapping
 
 from src.llm.config import PROMPT_TMPL
 from src.llm.eval import evaluate_split_batched
@@ -155,17 +155,65 @@ class _CondTransformCfg:
     )
 
 
+def _build_flat_layout(
+    spec: Mapping[str, Any]
+) -> Tuple[Dict[Tuple[str, str], slice], int]:
+    offset = 0
+    layout: Dict[Tuple[str, str], slice] = {}
+
+    for modality in ("dna", "protein"):
+        section = spec.get(modality, {}) or {}
+        if not section.get("enabled"):
+            continue
+
+        seq_len = int(section.get("seq_len", 0))
+        embed_dim = int(section.get("embed_dim", 0))
+        token_keys = section.get("token_keys") or {}
+        mask_keys = section.get("mask_keys") or {}
+
+        for key in (token_keys.get("wt"), token_keys.get("mt")):
+            if key:
+                size = seq_len * embed_dim
+                layout[(modality, key)] = slice(offset, offset + size)
+                offset += size
+
+        for key in (mask_keys.get("wt"), mask_keys.get("mt")):
+            if key:
+                layout[(modality, key)] = slice(offset, offset + seq_len)
+                offset += seq_len
+
+        for optional in (section.get("edit_key"), section.get("gap_key")):
+            if optional:
+                layout[(modality, optional)] = slice(offset, offset + seq_len)
+                offset += seq_len
+
+        for key in section.get("extra_mask_keys", []) or []:
+            layout[(modality, key)] = slice(offset, offset + seq_len)
+            offset += seq_len
+
+        pos_key = section.get("pos_key")
+        if pos_key:
+            shape = section.get("feature_shapes", {}).get(pos_key, [seq_len]) or [seq_len]
+            size = int(np.prod(shape))
+            layout[(modality, pos_key)] = slice(offset, offset + size)
+            offset += size
+
+    return layout, offset
+
+
 class _TransformedSplit:
     """
     Read-through view that transforms the conditioning vector per item.
     Returns a CPU torch.Tensor so downstream `.numpy()` continues to work.
-    Forwards attributes to the underlying split (including meta/D_eff/D_prot).
+    Forwards attributes to the underlying split (including meta).
     """
 
     def __init__(self, base_split, cfg: _CondTransformCfg):
         self.base = base_split
         self.cfg = cfg
         self.meta = getattr(base_split, "meta", None)
+        spec = getattr(base_split, "cond_spec", {}) or {}
+        self._layout, self._flat_dim = _build_flat_layout(spec)
 
     def __len__(self):
         return len(self.base)
@@ -181,7 +229,32 @@ class _TransformedSplit:
             extras = ()
             pack_tuple = False
 
+        def _flatten_conditioning(
+            conditioning: Mapping[str, Mapping[str, torch.Tensor]]
+        ) -> np.ndarray:
+            vec = np.zeros(self._flat_dim, dtype=np.float32)
+            if not self._layout:
+                return vec
+            for (modality, key), sl in self._layout.items():
+                mod_fields = conditioning.get(modality)
+                if not isinstance(mod_fields, Mapping) or key not in mod_fields:
+                    continue
+                tensor = torch.as_tensor(mod_fields[key]).detach().cpu()
+                if tensor.numel() == 0:
+                    continue
+                arr = tensor.reshape(-1).to(torch.float32).numpy()
+                expected = sl.stop - sl.start
+                if arr.size != expected:
+                    if arr.size < expected:
+                        arr = np.pad(arr, (0, expected - arr.size), mode="constant")
+                    else:
+                        arr = arr[:expected]
+                vec[sl] = arr
+            return vec
+
         def _to_numpy(val):
+            if isinstance(val, Mapping):
+                return _flatten_conditioning(val)
             return (
                 val.numpy()
                 if hasattr(val, "numpy")
@@ -246,31 +319,14 @@ class _TransformedSplit:
         return getattr(self.base, name)
 
 
-def _block_bounds(entry) -> Optional[Tuple[int, int]]:
-    """Return the [start, stop) bounds for a conditioning block."""
-
-    if entry is None:
+def _block_bounds(spec: Mapping[str, Any], modality: str) -> Optional[Tuple[int, int]]:
+    layout, _ = _build_flat_layout(spec)
+    spans = [sl for (mod, _), sl in layout.items() if mod == modality]
+    if not spans:
         return None
-
-    if isinstance(entry, slice):
-        return (int(entry.start or 0), int(entry.stop or 0))
-
-    if isinstance(entry, dict):
-        if "slice" in entry and isinstance(entry["slice"], slice):
-            sl = entry["slice"]
-            return (int(sl.start or 0), int(sl.stop or 0))
-
-        if "slices" in entry and isinstance(entry["slices"], dict):
-            starts: List[int] = []
-            stops: List[int] = []
-            for sl in entry["slices"].values():
-                if isinstance(sl, slice):
-                    starts.append(int(sl.start or 0))
-                    stops.append(int(sl.stop or 0))
-            if starts and stops:
-                return (min(starts), max(stops))
-
-    return None
+    start = min(sl.start for sl in spans)
+    stop = max(sl.stop for sl in spans)
+    return (start, stop)
 
 
 def _range_len(bounds: Optional[Tuple[int, int]]) -> int:
@@ -421,8 +477,8 @@ def run_prompt_vs_cond_ablation(
         raise ValueError("Sequence dataset missing 'train' split for ablation")
     cond_spec = getattr(train_split, "cond_spec", None)
     if cond_spec:
-        dna_bounds = _block_bounds(cond_spec.get("dna"))
-        prot_bounds = _block_bounds(cond_spec.get("protein"))
+        dna_bounds = _block_bounds(cond_spec, "dna")
+        prot_bounds = _block_bounds(cond_spec, "protein")
         D_eff = _range_len(dna_bounds)
         D_prot = _range_len(prot_bounds)
         dna_range = dna_bounds if D_eff > 0 else None

@@ -9,12 +9,6 @@ Trains a small MLP on features from SequenceTowerDataset and evaluates:
   - prot
   - dna+prot
 
-Assumes SequenceTowerDataset packs features in this order per sample:
-  [ dna_eff | prot_eff ]
-
-Relies on dataset attributes:
-  ds.D_eff, ds.D_prot
-
 Usage:
     from src.mlp_test import run_ablation_probes, print_probe_table
     from src.pipeline.datasets import load_manifest_datasets
@@ -29,7 +23,7 @@ wrappers that accept the unified pipeline configuration + manifest.
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List
 import numpy as np
 import torch
 import torch.nn as nn
@@ -105,23 +99,82 @@ def _find_best_threshold(y_val, p_val, *, grid=201, criterion="f1"):
 # --------------------------
 # Feature extraction
 # --------------------------
-def _feat_matrix(split, desc) -> Tuple[np.ndarray, np.ndarray]:
-    X, y = [], []
+def _flatten_modality(fields: Dict[str, torch.Tensor | np.ndarray], spec: Dict[str, Any]) -> np.ndarray:
+    parts: List[np.ndarray] = []
+
+    def _to_numpy(key: str) -> np.ndarray:
+        tensor = torch.as_tensor(fields[key]).detach().cpu()
+        if tensor.numel() == 0:
+            return np.zeros((0,), dtype=np.float32)
+        return tensor.reshape(-1).to(torch.float32).numpy()
+
+    token_keys = spec.get("token_keys") or {}
+    for key in (token_keys.get("wt"), token_keys.get("mt")):
+        if key and key in fields:
+            parts.append(_to_numpy(key))
+
+    mask_keys = spec.get("mask_keys") or {}
+    for key in (mask_keys.get("wt"), mask_keys.get("mt")):
+        if key and key in fields:
+            parts.append(_to_numpy(key))
+
+    for optional in (spec.get("edit_key"), spec.get("gap_key")):
+        if optional and optional in fields:
+            parts.append(_to_numpy(optional))
+
+    for key in spec.get("extra_mask_keys", []) or []:
+        if key in fields:
+            parts.append(_to_numpy(key))
+
+    pos_key = spec.get("pos_key")
+    if pos_key and pos_key in fields:
+        pos = torch.as_tensor(fields[pos_key]).detach().cpu()
+        if pos.dim() == 3 and pos.size(-1) == 1:
+            pos = pos.squeeze(-1)
+        parts.append(pos.reshape(-1).to(torch.float32).numpy())
+
+    if not parts:
+        return np.zeros((0,), dtype=np.float32)
+    return np.concatenate(parts).astype(np.float32, copy=False)
+
+
+def _extract_features(
+    split: SequenceTowerDataset,
+    desc: str,
+    spec: Dict[str, Any],
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray]:
+    dna_enabled = bool(spec.get("dna", {}).get("enabled"))
+    prot_enabled = bool(spec.get("protein", {}).get("enabled"))
+
+    dna_feats: List[np.ndarray] = [] if dna_enabled else []
+    prot_feats: List[np.ndarray] = [] if prot_enabled else []
+    labels: List[int] = []
+
     for i in tqdm(range(len(split)), desc=f"{desc}: features", unit="row", leave=False):
-        v, *_ = split[i]
-        v = v if isinstance(v, np.ndarray) else v.numpy()
-        X.append(v)
-        # label column is standardized to '_y' in meta
-        y.append(int(split.meta.iloc[i]["_y"]))
-    return np.vstack(X).astype(np.float32), np.array(y, dtype=np.int64)
+        conditioning, _ = split[i]
+        meta_row = split.meta.iloc[i]
+        labels.append(int(meta_row.get("_y")))
+        if dna_enabled and "dna" in conditioning:
+            dna_feats.append(
+                _flatten_modality(conditioning["dna"], spec.get("dna", {}))
+            )
+        if prot_enabled and "protein" in conditioning:
+            prot_feats.append(
+                _flatten_modality(conditioning["protein"], spec.get("protein", {}))
+            )
 
-
-def _slice_blocks(
-    X: np.ndarray, D_eff: int, D_prot: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    dna = X[:, :D_eff]
-    prot = X[:, D_eff : D_eff + D_prot]
-    return dna, prot
+    dna_arr = (
+        np.vstack(dna_feats).astype(np.float32)
+        if dna_enabled and dna_feats
+        else None
+    )
+    prot_arr = (
+        np.vstack(prot_feats).astype(np.float32)
+        if prot_enabled and prot_feats
+        else None
+    )
+    y = np.array(labels, dtype=np.int64)
+    return dna_arr, prot_arr, y
 
 
 # --------------------------
@@ -174,24 +227,22 @@ def _run_single_probe(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    D_eff = int(seq_ds["train"].D_eff)
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-
-    # pull features
-    Xtr_all, ytr = _feat_matrix(seq_ds["train"], "[train]")
-    Xv_all, yv = _feat_matrix(seq_ds["val"], "[val]")
-    Xt_all, yt = _feat_matrix(seq_ds["test"], "[test]")
-
-    tr_dna, tr_prot = _slice_blocks(Xtr_all, D_eff, D_prot)
-    va_dna, va_prot = _slice_blocks(Xv_all, D_eff, D_prot)
-    te_dna, te_prot = _slice_blocks(Xt_all, D_eff, D_prot)
+    cond_spec = getattr(seq_ds["train"], "cond_spec", {})
+    tr_dna, tr_prot, ytr = _extract_features(seq_ds["train"], "[train]", cond_spec)
+    va_dna, va_prot, yv = _extract_features(seq_ds["val"], "[val]", cond_spec)
+    te_dna, te_prot, yt = _extract_features(seq_ds["test"], "[test]", cond_spec)
 
     if feat_mode not in {"dna", "prot", "dna+prot"}:
         raise ValueError(f"Unsupported feature mode '{feat_mode}'")
 
+    dna_available = tr_dna is not None and va_dna is not None and te_dna is not None
+    prot_available = tr_prot is not None and va_prot is not None and te_prot is not None
+
     use_dna = feat_mode in {"dna", "dna+prot"}
     use_prot = feat_mode in {"prot", "dna+prot"}
-    if use_prot and D_prot <= 0:
+    if use_dna and not dna_available:
+        raise ValueError("DNA features requested but dataset lacks DNA modality")
+    if use_prot and not prot_available:
         raise ValueError(
             "Protein features requested but dataset lacks protein embeddings"
         )
@@ -205,20 +256,20 @@ def _run_single_probe(
     def zapply(X, sc):
         return sc.transform(X).astype(np.float32)
 
-    if use_dna:
+    if use_dna and tr_dna is not None and va_dna is not None and te_dna is not None:
         tr_dna, sc_dna = zfit(tr_dna)
         va_dna = zapply(va_dna, sc_dna)
         te_dna = zapply(te_dna, sc_dna)
-    if use_prot:
+    if use_prot and tr_prot is not None and va_prot is not None and te_prot is not None:
         tr_prot, sc_pr = zfit(tr_prot)
         va_prot = zapply(va_prot, sc_pr)
         te_prot = zapply(te_prot, sc_pr)
 
     def assemble(A, C):
         parts: List[np.ndarray] = []
-        if use_dna:
+        if use_dna and A is not None:
             parts.append(A)
-        if use_prot:
+        if use_prot and C is not None:
             parts.append(C)
         if not parts:
             raise ValueError(f"No features selected for mode '{feat_mode}'")
@@ -375,10 +426,18 @@ def run_ablation_probes(
     """
     Run a grid of ablation probes. Returns {mode: result_dict}.
     """
-    D_prot = int(getattr(seq_ds["train"], "D_prot", 0) or 0)
-    default_modes: List[str] = ["dna"]
-    if D_prot > 0:
-        default_modes.extend(["prot", "dna+prot"])
+    cond_spec = getattr(seq_ds["train"], "cond_spec", {})
+    dna_enabled = bool(cond_spec.get("dna", {}).get("enabled"))
+    prot_enabled = bool(cond_spec.get("protein", {}).get("enabled"))
+    default_modes: List[str] = []
+    if dna_enabled:
+        default_modes.append("dna")
+    if prot_enabled:
+        default_modes.append("prot")
+    if dna_enabled and prot_enabled:
+        default_modes.append("dna+prot")
+    if not default_modes:
+        default_modes.append("dna")
     if modes is None:
         # remove potential duplicates while preserving order
         seen = set()

@@ -230,109 +230,24 @@ def validate_protein_indices(indices: np.ndarray, total_rows: int) -> float:
     return covered / max(1, len(indices))
 
 
-def compute_protein_slices(
-    seq_len: int, embed_dim: int, offset: int
-) -> tuple[Optional[Dict[str, slice]], slice, int]:
-    """Return the layout slices for protein conditioning vectors."""
+def read_protein_features(
+    datasets: Mapping[str, h5py.Dataset], idx: int
+) -> Dict[str, torch.Tensor]:
+    """Materialise protein feature tensors for ``idx`` from ``datasets``."""
 
-    block_start = offset
-    slices: Optional[Dict[str, slice]] = None
-    if seq_len > 0 and embed_dim > 0:
-        L = seq_len
-        E = embed_dim
-        slices = {}
-        slices["wt_tokens"] = slice(offset, offset + L * E)
-        offset += L * E
-        slices["mt_tokens"] = slice(offset, offset + L * E)
-        offset += L * E
-        for key in (
-            "wt_mask",
-            "mt_mask",
-            "edit_mask",
-            "gap_mask",
-            "frameshift_mask",
-            "pos",
-        ):
-            slices[key] = slice(offset, offset + L)
-            offset += L
-    block_stop = offset
-    return slices, slice(block_start, block_stop), offset
+    if idx < 0:
+        raise ValueError("Protein feature index must be non-negative")
 
-
-def write_protein_features(
-    dest: np.ndarray,
-    slices: Optional[Mapping[str, slice]],
-    idx: int,
-    datasets: Mapping[str, h5py.Dataset],
-) -> None:
-    """Populate ``dest`` with protein features for ``idx`` if available."""
-
-    if slices is None or idx < 0:
-        return
-
-    required_keys = (
-        "wt_tokens",
-        "mt_tokens",
-        "wt_mask",
-        "mt_mask",
-        "edit_mask",
-        "gap_mask",
-        "frameshift_mask",
-        "pos",
-    )
-    missing_slices = [key for key in required_keys if key not in slices]
-    assert not missing_slices, f"Protein feature slices missing: {missing_slices}"
-
-    missing_datasets = [key for key in required_keys if key not in datasets]
-    assert not missing_datasets, f"Protein feature datasets missing: {missing_datasets}"
-
-    wt_tokens_ds = datasets["wt_tokens"]
-    assert 0 <= idx < wt_tokens_ds.shape[0], "Protein WT token index out of range"
-    seq_len = int(wt_tokens_ds.shape[1]) if wt_tokens_ds.ndim >= 2 else 0
-    embed_dim = int(wt_tokens_ds.shape[2]) if wt_tokens_ds.ndim >= 3 else 0
-
-    wt_span = dest[slices["wt_tokens"]]
-    assert wt_span.ndim == 1, "Protein WT token slice should be 1-D"
-    assert wt_span.size == seq_len * embed_dim, "Protein WT token buffer mismatch"
-    wt_dest = wt_span.reshape(seq_len, embed_dim)
-    if wt_dest.size:
-        wt_tokens_ds.read_direct(wt_dest, np.s_[idx, :, :])
-
-    mt_span = dest[slices["mt_tokens"]]
-    assert mt_span.ndim == 1, "Protein MT token slice should be 1-D"
-    assert mt_span.size == seq_len * embed_dim, "Protein MT token buffer mismatch"
-    mt_dest = mt_span.reshape(seq_len, embed_dim)
-    if mt_dest.size:
-        datasets["mt_tokens"].read_direct(mt_dest, np.s_[idx, :, :])
-
-    for key in ("wt_mask", "mt_mask", "edit_mask", "gap_mask", "frameshift_mask"):
-        ds = datasets[key]
-        view = dest[slices[key]]
-        assert view.ndim == 1, f"Protein mask slice '{key}' should be 1-D"
-        assert ds.shape[0] > idx, f"Protein dataset '{key}' index out of range"
-        if ds.ndim >= 2:
-            assert view.size == int(ds.shape[1]), f"Protein mask buffer mismatch for {key}"
-        if view.size:
-            ds.read_direct(view, np.s_[idx, :])
-
-    pos_ds = datasets["pos"]
-    assert pos_ds.shape[0] > idx, "Protein position dataset index out of range"
-    pos_shape = pos_ds.shape[1:]
-    pos_view = dest[slices["pos"]]
-    assert pos_view.ndim == 1, "Protein position slice should be 1-D"
-    if pos_shape:
-        expected = int(np.prod(pos_shape))
-        if expected == pos_view.size:
-            pos_view = pos_view.reshape(pos_shape)
-        else:
-            assert (
-                pos_view.size == 0
-            ), "Protein position buffer must match dataset shape or be empty"
-    if pos_view.size:
-        pos_ds.read_direct(
-            pos_view,
-            (idx,) + (slice(None),) * (pos_ds.ndim - 1),
-        )
+    features: Dict[str, torch.Tensor] = {}
+    for name, ds in datasets.items():
+        if ds.shape[0] <= idx:
+            raise IndexError(f"Protein dataset '{name}' index out of range: {idx}")
+        arr = np.asarray(ds[idx])
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32)
+        tensor = torch.from_numpy(arr)
+        features[name] = tensor
+    return features
 
 
 # ============================================================

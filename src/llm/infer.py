@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from .config import (
     COND_END_TOKEN,
 )
 from .chat import build_chat_strings
+from .data import conditioning_to
 
 
 def encode_label_variants(tokenizer, label_word: str) -> list[list[int]]:
@@ -25,39 +26,17 @@ def encode_label_variants(tokenizer, label_word: str) -> list[list[int]]:
             out.append(list(ids))
             seen.add(t)
     return out
-
-
-def _to_numpy_cond(cond_vecs: Any) -> np.ndarray:
-    if isinstance(cond_vecs, torch.Tensor):
-        arr = cond_vecs.detach().cpu().numpy()
-    else:
-        arr = np.asarray(cond_vecs)
-    arr = arr.astype(np.float32, copy=False)
-    if arr.ndim == 1:
-        arr = arr[np.newaxis, :]
-    if arr.ndim != 2:
-        raise ValueError("cond_vecs must be 1D or 2D array-like")
-    return arr
-
-
 @torch.inference_mode()
 def prepare_prompt_embeddings(
     model,
     tokenizer,
     prompt_texts: Sequence[str],
-    cond_vecs,
+    conditioning: Mapping[str, Mapping[str, torch.Tensor | np.ndarray]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if isinstance(prompt_texts, str):
         prompts = [prompt_texts]
     else:
         prompts = [p or "" for p in prompt_texts]
-
-    cond = _to_numpy_cond(cond_vecs)
-    if cond.shape[0] != len(prompts):
-        raise ValueError(
-            "Number of prompts and conditioning vectors must match: "
-            f"{len(prompts)} vs {cond.shape[0]}"
-        )
 
     prompt_strings, _ = build_chat_strings(tokenizer, prompts)
 
@@ -74,8 +53,8 @@ def prepare_prompt_embeddings(
     E = model.get_input_embeddings()
     txt_emb = E(enc["input_ids"])  # [B, T, H]
 
-    cond_tensor = torch.from_numpy(cond).to(dev, dtype=txt_emb.dtype)  # [B, D]
-    cond_emb, _ = model.cond_projector(cond_tensor)  # [B, K, H]
+    conditioning = conditioning_to(conditioning, device=dev, dtype=txt_emb.dtype)
+    cond_emb, _ = model.cond_projector(conditioning)
 
     def _single_token_embedding(token: str) -> torch.Tensor:
         ids = tokenizer.encode(token, add_special_tokens=False)
@@ -171,10 +150,10 @@ def predict_label_with_probs(
     model,
     tokenizer,
     prompt_text: str,
-    cond_vec_np,
+    conditioning: Mapping[str, Mapping[str, torch.Tensor | np.ndarray]],
 ) -> Dict[str, Any]:
     inputs_embeds, attn = prepare_prompt_embeddings(
-        model, tokenizer, [prompt_text], cond_vec_np
+        model, tokenizer, [prompt_text], conditioning
     )
 
     logprobs = {}

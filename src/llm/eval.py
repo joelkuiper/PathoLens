@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from src.llm.config import PROMPT_TMPL, BIN_LABELS
+from src.llm.data import stack_conditioning_tensors
 from src.llm.load import load_finetuned_model
 from src.llm.modeling import enable_fast_generate
 from src.llm.infer import (
@@ -72,25 +73,19 @@ class _EvalDataset(Dataset):
         self,
         seq_split: Any,
         indices: List[int],
-        cond_dim: int,
     ) -> None:
         self.seq_split = seq_split
         self.meta = seq_split.meta
         self.indices = list(indices)
-        self.cond_dim = int(cond_dim or 0)
 
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self.indices)
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         idx = self.indices[item]
-        x, *_ = self.seq_split[idx]
-        if isinstance(x, torch.Tensor):
-            arr = x.detach().cpu().numpy()
-        else:
-            arr = np.asarray(x)
-        arr = arr.astype(np.float32, copy=False)
-        cond_vec = arr[: self.cond_dim] if self.cond_dim else arr
+        conditioning, _ = self.seq_split[idx]
+        if not isinstance(conditioning, dict):
+            raise TypeError("Sequence dataset must return conditioning mappings")
 
         meta_row = self.meta.iloc[idx]
 
@@ -108,16 +103,14 @@ class _EvalDataset(Dataset):
             raise KeyError("Evaluation dataset requires '_y' in metadata.")
         label = int(meta_row["_y"])
 
-        return {"cond_vec": cond_vec, "prompt": prompt_text, "label": label}
+        return {"conditioning": conditioning, "prompt": prompt_text, "label": label}
 
 
 def _eval_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    conds = torch.from_numpy(
-        np.stack([b["cond_vec"] for b in batch]).astype(np.float32)
-    )
+    conditioning = stack_conditioning_tensors([b["conditioning"] for b in batch])
     prompts = [str(b["prompt"]) for b in batch]
     labels = torch.tensor([int(b["label"]) for b in batch], dtype=torch.long)
-    return {"cond_vec": conds, "prompts": prompts, "labels": labels}
+    return {"conditioning": conditioning, "prompts": prompts, "labels": labels}
 
 
 def _build_eval_loader(
@@ -168,53 +161,14 @@ def evaluate_split_batched(
     adapter_dir = os.path.join(out_dir, "adapter")
     projector_path = os.path.join(out_dir, "projector")
 
-    def _block_bounds(entry) -> Optional[Tuple[int, int]]:
-        if entry is None:
-            return None
-        if isinstance(entry, slice):
-            return (int(entry.start or 0), int(entry.stop or 0))
-        if isinstance(entry, dict):
-            if "slice" in entry and isinstance(entry["slice"], slice):
-                sl = entry["slice"]
-                return (int(sl.start or 0), int(sl.stop or 0))
-            if "slices" in entry and isinstance(entry["slices"], dict):
-                starts: List[int] = []
-                stops: List[int] = []
-                for sl in entry["slices"].values():
-                    if isinstance(sl, slice):
-                        starts.append(int(sl.start or 0))
-                        stops.append(int(sl.stop or 0))
-                if starts and stops:
-                    return (min(starts), max(stops))
-        return None
-
-    def _block_len(bounds: Optional[Tuple[int, int]]) -> int:
-        if not bounds:
-            return 0
-        start, stop = bounds
-        return max(0, int(stop) - int(start))
-
     train_split = seq_ds["train"]
     cond_spec = getattr(train_split, "cond_spec", None)
-    if cond_spec:
-        dna_bounds = _block_bounds(cond_spec.get("dna"))
-        prot_bounds = _block_bounds(cond_spec.get("protein"))
-        D_eff = _block_len(dna_bounds)
-        D_prot = _block_len(prot_bounds)
-        known_bounds = [b for b in (dna_bounds, prot_bounds) if b]
-        if known_bounds:
-            D_cond = max(stop for _, stop in known_bounds)
-        else:
-            D_cond = int(getattr(train_split, "total_dim", 0))
-        if not D_cond:
-            D_cond = int(getattr(train_split, "total_dim", D_eff + D_prot))
-    else:
-        D_eff = int(getattr(train_split, "D_eff", 0))
-        D_prot = int(getattr(train_split, "D_prot", 0))
-        D_cond = D_eff + D_prot
-    print(f"[INFO] Eval: D_cond={D_cond} (eff={D_eff} prot={D_prot})")
+    print(
+        "[INFO] Eval conditioning: "
+        f"modalities={cond_spec.get('modalities', []) if cond_spec else 'unknown'}"
+    )
 
-    tok, model = load_finetuned_model(model_id, D_cond, adapter_dir, projector_path)
+    tok, model = load_finetuned_model(model_id, adapter_dir, projector_path)
     enable_fast_generate(model, tok)
 
     ds = seq_ds[split]
@@ -235,7 +189,7 @@ def evaluate_split_batched(
             label_variants_cache[label] = encode_label_variants(tok, label)
         return label_variants_cache[label]
 
-    eval_dataset = _EvalDataset(ds, idxs, D_cond)
+    eval_dataset = _EvalDataset(ds, idxs)
     loader = _build_eval_loader(
         eval_dataset,
         batch_size=batch_size,
@@ -250,7 +204,7 @@ def evaluate_split_batched(
     # Batched scoring — matches eval_old path
     for batch in tqdm(loader, desc=f"Scoring [{split}]", unit="batch"):
         prompts = batch["prompts"]
-        conds = batch["cond_vec"]
+        conds = batch["conditioning"]
         y_batch = batch["labels"].tolist()
 
         inp_emb, attn = prepare_prompt_embeddings(model, tok, prompts, conds)

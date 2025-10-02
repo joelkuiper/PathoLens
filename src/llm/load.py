@@ -24,7 +24,6 @@ def _select_compute_dtype():
 
 def load_finetuned_model(
     model_id: str,
-    D_cond: int,
     adapter_dir: str,
     projector_path: str,
 ):
@@ -82,20 +81,12 @@ def load_finetuned_model(
             f"        Base model hidden_size={hidden}"
         )
 
-    if projector.d_in != D_cond:
-        raise ValueError(
-            "[LOAD] D_cond mismatch:\n"
-            f"        Provided D_cond={D_cond}\n"
-            f"        Saved projector expects D_cond={projector.d_in}\n"
-            "        Pass the correct D_cond (e.g., D_eff + D_prot)."
-        )
-
     emb = model.get_input_embeddings().weight
     projector = projector.to(device=emb.device, dtype=emb.dtype)
     model.add_module("cond_projector", projector)
 
     print(
-        f"[LOAD] Projector loaded. hidden={hidden} k={projector.k} D_cond={projector.d_in} "
+        f"[LOAD] Projector loaded. hidden={hidden} k={projector.k} "
         f"dtype={next(projector.parameters()).dtype} device={next(projector.parameters()).device}"
     )
 
