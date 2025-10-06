@@ -1,0 +1,113 @@
+@startuml
+!pragma layout elk
+title PathoLens — Modality-conditioned LLM
+
+skinparam shadowing false
+skinparam linetype ortho
+skinparam defaultFontSize 18
+skinparam LineThickness 1.5
+skinparam ArrowThickness 1.5
+skinparam Rectangle {
+  RoundCorner 12
+  BorderColor #5b6570
+  BackgroundColor #ffffff
+}
+skinparam Package {
+  BorderColor #8e98a3
+  BackgroundColor #f7f9fb
+  FontColor #2e3338
+}
+left to right direction
+
+' ======= Embedding archives (high-level) =======
+package "Embedding archives (built offline, reused at train/infer)" {
+  rectangle "DNA embeddings (HDF5)\n• from ClinVar+FASTA → NT encoder\n• validated by load_dna_archive()" as H5_DNA
+  rectangle "Protein embeddings (HDF5)\n• from VEP WT/MT → ESMC encoder\n• validated by load_protein_archive()" as H5_PROT
+}
+
+' ======= Data → Conditioning =======
+package "Data → Conditioning" {
+  rectangle "SequenceTowerDataset\n(meta + *_embedding_idx)" as DL_SEQ
+  rectangle "read_*_features\n(HDF5 → tensors)" as DL_FEAT
+  rectangle "Collator\n• stack_conditioning_tensors\n• conditioning_to(...)" as DL_COLL
+  DL_SEQ --> DL_FEAT
+  DL_FEAT --> DL_COLL
+}
+
+H5_DNA --> DL_SEQ
+H5_PROT --> DL_SEQ
+
+' ======= CondProjector =======
+package "CondProjector" {
+  rectangle "SequenceCNNEncoder (DNA)" as ENC_DNA
+  rectangle "SequenceCNNEncoder (Protein)" as ENC_PROT
+  rectangle "Concat k tokens" as CONCAT
+  ENC_DNA --> CONCAT
+  ENC_PROT --> CONCAT
+}
+DL_COLL --> ENC_DNA : conditioning['dna']
+DL_COLL --> ENC_PROT : conditioning['protein']
+
+' ======= Prompt + LLM =======
+package "Prompt + LLM" {
+  rectangle "Tokenizer → IDs" as PR_TOK
+  rectangle "Embeddings:\n[COND_START] + virtual + [COND_END]\n+ [COND_DELIM] + prompt embeds" as PR_VIRT
+  rectangle "Expand masks/positions\nfor prepended k tokens" as PR_MASKS
+  rectangle "Causal LM (e.g., Qwen) + LoRA" as LLM_CORE
+  rectangle "Aux head (optional)\nmean(cond tokens) → 2-class" as AUX
+}
+CONCAT --> PR_VIRT : [B, k_total, H] (embeds)
+PR_VIRT --> PR_MASKS
+PR_MASKS --> LLM_CORE : inputs_embeds +\nposition_ids + attention_mask
+PR_TOK  --> LLM_CORE : prompt IDs (masked pre-label)
+PR_VIRT --> AUX       : train-only logits
+
+rectangle "Score label words\nBenign vs Pathogenic\n(two-class log-sum-exp)" as OUT
+LLM_CORE --> OUT
+
+' — Training notes (compact) —
+note right of OUT
+Teacher forcing (train):
+• Predict token t from ≤ t−1 (shift by 1).
+• Loss only on supervised spans (others = −100).
+• Conditioning tokens are prepended and never supervised.
+end note
+
+note bottom of LLM_CORE
+Prompt dropout (train-only):
+• With prob p, zero & mask prompt portion before first label.
+• Encourages reliance on conditioning tokens.
+end note
+
+' ======= Sequence encoder internals (kept concise) =======
+package "SequenceCNNEncoder — internals" as ENC_TMPL {
+  rectangle "Build features:\nwt | mt | (mt−wt) | pos? | edit? | gap? | extras?" as FEAT
+  rectangle "Linear → C" as INPROJ
+  rectangle "Residual Conv ×L\nConv1d → LN → GELU\n(masked pre/post) + skip" as CONV
+  rectangle "QueryPooling(k)\nlearnable queries → [B,k,C]" as POOL
+  rectangle "Linear(C→H) → [B,k,H]" as OUTTOK
+  FEAT   -down-> INPROJ
+  INPROJ -down-> CONV
+  CONV   -down-> POOL
+  POOL   -down-> OUTTOK
+
+  note right of CONV
+  Residual 1D conv refines per-position context;
+  LayerNorm+GELU stabilize; pad regions nulled.
+  end note
+
+  note right of POOL
+  k learnable queries attend over positions;
+  masked softmax ignores padding; scale 1/√C.
+  end note
+}
+ENC_DNA ..> ENC_TMPL : «uses template»
+ENC_PROT ..> ENC_TMPL : «uses template»
+
+legend right
+<b>Legend</b>
+solid → data/flow, dotted → template/ref
+HDF5 archives are produced once (offline) and reused by the loader.
+end legend
+
+@enduml
