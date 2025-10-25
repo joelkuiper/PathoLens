@@ -1,7 +1,4 @@
 # PathoLens
-
-⚠️ This is a learning experiment; please don’t take it too seriously.
-
 ## Task
 Given [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/), predict the pathogenicity of a variant. Many tools attempt to predict pathogenicity (e.g., CADD), and it is generally considered a hard problem because signal comes from diverse molecular and biological factors.
 
